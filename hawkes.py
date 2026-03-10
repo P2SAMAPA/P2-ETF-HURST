@@ -216,7 +216,7 @@ def fit_exponential(
     T: float,
     ticker: str = "",
     event_def: str = "combined",
-    n_starts: int = 8,
+    n_starts: int = 3,
 ) -> HawkesParams:
     """Fit exponential kernel Hawkes via MLE with multiple random starts."""
     best_nll = np.inf
@@ -266,7 +266,7 @@ def fit_powerlaw(
     T: float,
     ticker: str = "",
     event_def: str = "combined",
-    n_starts: int = 6,
+    n_starts: int = 2,
 ) -> HawkesParams:
     """Fit power-law kernel Hawkes via MLE."""
     best_nll = np.inf
@@ -409,33 +409,89 @@ def fit_etf(
     return params, event_idx, intensities
 
 
+def _fit_etf_worker(args):
+    """Worker function for parallel ETF fitting — must be top-level for pickling."""
+    ticker, ret_values, ret_index, vol_values, vol_index, event_def = args
+    ret = pd.Series(ret_values, index=ret_index, name=ticker)
+    vol = pd.Series(vol_values, index=vol_index) if vol_values is not None else None
+    try:
+        params, event_idx, intensities = fit_etf(ticker, ret, vol, event_def)
+        return ticker, params, event_idx, intensities, None
+    except Exception as e:
+        return ticker, None, None, None, str(e)
+
+
 def fit_all_etfs(
     returns_df: pd.DataFrame,
     volume_df:  pd.DataFrame | None,
     event_def:  str = "combined",
 ) -> dict:
     """
-    Fit Hawkes for all ETFs in ETF_UNIVERSE.
+    Fit Hawkes for all ETFs in ETF_UNIVERSE in parallel.
+    Uses ProcessPoolExecutor with up to 6 workers (one per ETF).
+    Falls back to sequential fitting if parallelisation fails.
+
     Returns dict: {ticker: {"params": HawkesParams, "intensity": np.ndarray, "events": np.ndarray}}
     """
-    results = {}
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    # Build args list — pass raw arrays (picklable) not pandas objects
+    args_list = []
     for ticker in ETF_UNIVERSE:
         if ticker not in returns_df.columns:
             log.warning(f"{ticker} not in returns_df — skipping")
             continue
         ret = returns_df[ticker].dropna()
-        vol = volume_df[ticker].reindex(ret.index) if volume_df is not None and ticker in volume_df.columns else None
-        try:
-            params, event_idx, intensities = fit_etf(ticker, ret, vol, event_def)
-            results[ticker] = {
-                "params":    params,
-                "intensity": intensities,
-                "events":    event_idx,
-            }
-            log.info(f"{ticker} fitted — μ={params.mu:.4f} branching={params.branching:.3f} "
-                     f"kernel={params.kernel} AIC={params.aic:.2f}")
-        except Exception as e:
-            log.error(f"Failed to fit {ticker}: {e}")
+        vol = volume_df[ticker].reindex(ret.index) if (
+            volume_df is not None and ticker in volume_df.columns
+        ) else None
+        args_list.append((
+            ticker,
+            ret.values,
+            ret.index,
+            vol.values if vol is not None else None,
+            vol.index  if vol is not None else ret.index,
+            event_def,
+        ))
+
+    results = {}
+
+    try:
+        n_workers = min(len(args_list), 6)
+        log.info(f"Fitting {len(args_list)} ETFs in parallel ({n_workers} workers)...")
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_fit_etf_worker, args): args[0]
+                       for args in args_list}
+            for future in as_completed(futures):
+                ticker, params, event_idx, intensities, err = future.result()
+                if err:
+                    log.error(f"Failed to fit {ticker}: {err}")
+                else:
+                    results[ticker] = {
+                        "params":    params,
+                        "intensity": intensities,
+                        "events":    event_idx,
+                    }
+                    log.info(f"{ticker} fitted — μ={params.mu:.4f} "
+                             f"branching={params.branching:.3f} "
+                             f"kernel={params.kernel} AIC={params.aic:.2f}")
+    except Exception as e:
+        log.warning(f"Parallel fitting failed ({e}) — falling back to sequential")
+        for args in args_list:
+            ticker = args[0]
+            ticker, params, event_idx, intensities, err = _fit_etf_worker(args)
+            if err:
+                log.error(f"Failed to fit {ticker}: {err}")
+            else:
+                results[ticker] = {
+                    "params":    params,
+                    "intensity": intensities,
+                    "events":    event_idx,
+                }
+                log.info(f"{ticker} fitted — μ={params.mu:.4f} "
+                         f"branching={params.branching:.3f} "
+                         f"kernel={params.kernel} AIC={params.aic:.2f}")
+
     return results
 
 
