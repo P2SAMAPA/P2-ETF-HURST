@@ -110,6 +110,39 @@ def load_intensity_history_from_hf() -> pd.DataFrame | None:
         return None
 
 
+def load_hurst_history_from_hf() -> pd.DataFrame | None:
+    """Load rolling Hurst history from HF."""
+    try:
+        path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="hurst_history.parquet",
+            repo_type="dataset",
+            token=_hf_token(),
+        )
+        df = pd.read_parquet(path)
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception as e:
+        log.warning(f"Could not load Hurst history from HF: {e}")
+        return None
+
+
+def load_cross_excitation_from_hf() -> pd.DataFrame | None:
+    """Load cross-ETF excitation matrix from HF."""
+    try:
+        path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="cross_excitation.parquet",
+            repo_type="dataset",
+            token=_hf_token(),
+        )
+        df = pd.read_parquet(path)
+        return df
+    except Exception as e:
+        log.warning(f"Could not load cross excitation matrix from HF: {e}")
+        return None
+
+
 def load_params_from_hf() -> dict | None:
     """Load fitted Hawkes parameters JSON from HF."""
     try:
