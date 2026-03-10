@@ -40,7 +40,7 @@ from data_manager import (
     ETF_UNIVERSE, BENCHMARKS, ALL_TICKERS,
 )
 from hawkes import (
-    fit_all_etfs, get_signal, select_best_event_def,
+    fit_all_etfs, get_signal,
     compute_cross_excitation_matrix, build_intensity_history,
     EVENT_DEFINITIONS,
 )
@@ -96,18 +96,13 @@ def run_pipeline(
     results["data_rows"]  = len(ohlcv)
     results["date_range"] = f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}"
 
-    # ── Step 2: Select best event definition ─────────────────────────────────
+    # ── Step 2: Event definition ──────────────────────────────────────────────
     log.info("Step 2: Event definition selection...")
-
-    # Use cached event_def unless forced to reselect
-    saved_event_def = metadata.get("best_event_def")
-    if saved_event_def and not reselect_event_def:
-        event_def = saved_event_def
-        log.info(f"  Using saved event definition: {event_def}")
-    else:
-        log.info("  Comparing all three event definitions on OOS hit ratio...")
-        event_def = select_best_event_def(etf_returns, volume_df, n_days_oos=252)
-        log.info(f"  Selected: {event_def}")
+    # "combined" (strict AND) produces too few events for MLE to detect
+    # clustering — branching ratio collapses to 0. Use return_only which
+    # gives ~3x more events and allows the MLE to find genuine self-excitation.
+    event_def = "return_only"
+    log.info(f"  Using event definition: {event_def}")
 
     results["event_def"] = event_def
 
