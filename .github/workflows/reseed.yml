@@ -1,0 +1,36 @@
+# reseed.yml — P2-ETF-HAWKES
+# ONE-TIME manual workflow to seed the full OHLCV dataset from 2008.
+# Run this ONCE after creating the HF dataset repo.
+# Trigger manually from GitHub Actions UI only.
+
+name: Reseed Dataset
+
+on:
+  workflow_dispatch:    # manual trigger only
+
+jobs:
+  reseed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full OHLCV reseed from 2008
+        run: python reseed.py
+
+      - name: Log completion
+        run: echo "✅ Reseed complete $(date -u)"
