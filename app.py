@@ -39,9 +39,10 @@ try:
     from data_manager import (
         load_ohlcv_from_hf, load_signals_from_hf,
         load_intensity_history_from_hf, load_params_from_hf,
+        load_hurst_history_from_hf, load_cross_excitation_from_hf,
         get_returns, get_volume, ETF_UNIVERSE, BENCHMARKS,
     )
-    from hawkes import EVENT_DEFINITIONS, compute_cross_excitation_matrix, fit_all_etfs
+    from hawkes import EVENT_DEFINITIONS
     from hurst import hurst_label, hurst_colour
     from strategy import (
         generate_signal_option_a, generate_signal_option_b,
@@ -80,6 +81,14 @@ def cached_load_intensity():
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_params():
     return load_params_from_hf()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_hurst():
+    return load_hurst_history_from_hf()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_cross_excitation():
+    return load_cross_excitation_from_hf()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -260,35 +269,79 @@ if days_stale > 1:
 
 # ── Load pre-computed outputs ─────────────────────────────────────────────────
 with st.spinner("🧠 Loading model outputs from HuggingFace..."):
-    params_dict      = cached_load_params()
-    intensity_hist   = cached_load_intensity()
-    signals_df       = cached_load_signals()
+    params_dict    = cached_load_params()
+    intensity_hist = cached_load_intensity()
+    signals_df     = cached_load_signals()
+    hurst_df       = cached_load_hurst()
+    cross_matrix   = cached_load_cross_excitation()
 
-# ── Fit models (if no cached params or force refit) ───────────────────────────
+# ── Validate all outputs loaded ───────────────────────────────────────────────
 if params_dict is None:
-    st.warning("⚠️ No fitted model found — fitting now (this may take a few minutes)...")
-    with st.spinner("🔧 Fitting Hawkes models..."):
-        event_def   = "combined"
-        fit_results = fit_all_etfs(etf_ret, volume_df, event_def=event_def)
-else:
-    event_def   = params_dict.get("best_event_def", "combined")
-    fit_results = fit_all_etfs(etf_ret, volume_df, event_def=event_def)
+    st.error(
+        "❌ No fitted model found on HuggingFace. "
+        "Trigger the **Daily Training Pipeline** from GitHub Actions first, "
+        "then click **🔄 Force Data Refresh** and try again."
+    )
+    st.stop()
 
-# ── Hurst ─────────────────────────────────────────────────────────────────────
-with st.spinner("📐 Computing Hurst exponents..."):
-    from hurst import compute_all_hurst
-    hurst_df = compute_all_hurst(etf_ret, window=252)
+event_def = params_dict.get("best_event_def", "combined")
 
-# ── Signals ───────────────────────────────────────────────────────────────────
+if intensity_hist is None:
+    st.warning("⚠️ Intensity history not found on HF — some charts will be unavailable.")
+
+if hurst_df is None:
+    st.warning("⚠️ Hurst history not found on HF — Option B will be unavailable.")
+    st.stop()
+
+if cross_matrix is None:
+    st.warning("⚠️ Cross-excitation matrix not found on HF — heatmap will be unavailable.")
+
+# ── Reconstruct fit_results from HF params + intensity ────────────────────────
+# We rebuild HawkesParams objects from the stored JSON so signals can be
+# generated without any MLE fitting in the app.
+from hawkes import HawkesParams, compute_intensity, get_event_times, detect_events
+
+fit_results = {}
+for ticker in ETF_UNIVERSE:
+    p = params_dict.get(ticker)
+    if not p:
+        continue
+    params = HawkesParams(
+        ticker    = ticker,
+        kernel    = p.get("kernel", "exponential"),
+        mu        = p.get("mu",     0.01),
+        alpha     = p.get("alpha",  0.0),
+        beta      = p.get("beta",   0.0),
+        k         = p.get("k",      0.0),
+        c         = p.get("c",      0.0),
+        theta     = p.get("theta",  0.0),
+        aic       = p.get("aic",    0.0),
+        n_events  = p.get("n_events", 0),
+        branching = p.get("branching", 0.0),
+        event_def = p.get("event_def", event_def),
+    )
+    # Use pre-computed intensity from HF if available, else reconstruct
+    if intensity_hist is not None and ticker in intensity_hist.columns:
+        intensity_arr = intensity_hist[ticker].values
+    else:
+        ret    = etf_ret[ticker].dropna() if ticker in etf_ret.columns else pd.Series(dtype=float)
+        vol    = volume_df[ticker].reindex(ret.index) if ticker in volume_df.columns else None
+        events = detect_events(ret, vol, method=event_def)
+        ev_idx = get_event_times(events)
+        intensity_arr = compute_intensity(params, ev_idx,
+                                          np.arange(len(ret), dtype=float))
+    fit_results[ticker] = {
+        "params":    params,
+        "intensity": intensity_arr,
+        "events":    np.array([]),   # not needed for signal generation
+    }
+
+# ── Generate signals from pre-fitted params (no MLE) ─────────────────────────
 sig_a = generate_signal_option_a(fit_results, etf_ret, event_def)
 sig_b = generate_signal_option_b(fit_results, etf_ret, hurst_df, event_def)
 
 # True next trading day from today's clock
 true_next_date = next_trading_day_from_today()
-
-# ── Cross-excitation matrix ───────────────────────────────────────────────────
-with st.spinner("🔗 Computing cross-ETF excitation matrix..."):
-    cross_matrix = compute_cross_excitation_matrix(etf_ret, volume_df, event_def)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
