@@ -101,11 +101,6 @@ with st.sidebar:
     st.divider()
 
     st.header("⚙️ Configuration")
-    start_year = st.slider(
-        "Backtest Start Year", min_value=2008, max_value=2024,
-        value=2012, step=1,
-        help="Earlier = more history; model always trains on full dataset"
-    )
     conviction_gate = st.slider(
         "Min Conviction Gate", min_value=0.1, max_value=0.8,
         value=0.3, step=0.05,
@@ -245,20 +240,18 @@ with st.spinner("📥 Loading OHLCV data from HuggingFace..."):
         st.error("❌ No OHLCV data found. Run the reseed workflow first.")
         st.stop()
 
-    cutoff     = pd.Timestamp(f"{start_year}-01-01")
-    ohlcv_bt   = ohlcv[ohlcv.index >= cutoff]
-    returns_df = get_returns(ohlcv_bt)
-    volume_df  = get_volume(ohlcv_bt)
+    returns_df = get_returns(ohlcv)
+    volume_df  = get_volume(ohlcv)
     etf_ret    = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
     bm_ret     = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
 
-    st.success(f"✅ OHLCV: {len(ohlcv_bt):,} rows "
-               f"({ohlcv_bt.index[0].date()} → {ohlcv_bt.index[-1].date()})")
+    st.success(f"✅ OHLCV: {len(ohlcv):,} rows "
+               f"({ohlcv.index[0].date()} → {ohlcv.index[-1].date()})")
 
 # ── Check data staleness ──────────────────────────────────────────────────────
 from datetime import date as _date
 today_date  = _date.today()
-data_date   = ohlcv_bt.index[-1].date()
+data_date   = ohlcv.index[-1].date()
 days_stale  = (today_date - data_date).days
 if days_stale > 1:
     st.warning(
@@ -432,6 +425,12 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
 
     # ── Option B extra: Hurst details ─────────────────────────────────────────
     if option == "B" and "details" in sig:
+        if sig.get("hawkes_flat"):
+            st.info(
+                "ℹ️ **Hawkes scores are near-identical across ETFs** (spread < 0.05) — "
+                "Hurst persistence is the primary differentiator today (weight boosted to 80%).",
+                icon="📐"
+            )
         st.subheader("📐 Hurst Exponent per ETF")
         h_cols = st.columns(len(ETF_UNIVERSE))
         for col, ticker in zip(h_cols, ETF_UNIVERSE):
@@ -444,6 +443,22 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
                 delta=lbl,
                 delta_color="off",
             )
+        # Combined score breakdown table
+        st.subheader("🧮 Combined Score Breakdown")
+        rows = []
+        for t in ETF_UNIVERSE:
+            det = sig["details"].get(t, {})
+            rows.append({
+                "ETF":           t,
+                "Hawkes Score":  det.get("hawkes_score", 0),
+                "Hurst H":       det.get("hurst_H", 0.5),
+                "Hurst Score":   det.get("hurst_score", 0),
+                "Combined":      det.get("combined", 0),
+                "Hurst Regime":  det.get("hurst_label", "—"),
+            })
+        rows_df = pd.DataFrame(rows).set_index("ETF").sort_values("Combined", ascending=False)
+        st.dataframe(rows_df.style.highlight_max(subset=["Combined"], color="#d1fae5"),
+                     use_container_width=True)
 
     # ── Intensity history chart ───────────────────────────────────────────────
     if show_intensity and intensity_hist is not None:
