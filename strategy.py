@@ -111,18 +111,14 @@ def generate_signal_option_b(
     Hurst can differentiate ETFs even when Hawkes scores are nearly identical.
     """
     sig = get_signal(fit_results, returns_df, event_def=event_def)
-    ex  = sig["excitation_ratios"]
+    ex  = sig["excitation_ratios"]   # raw λ*(t)/μ ratios, e.g. {VNQ:1.58, TLT:1.00, ...}
 
-    # Normalise excitation ratios to [0, 1]
-    # If spread is very small (< 0.05), Hawkes scores are essentially flat —
-    # reduce Hawkes weight and let Hurst carry more weight in that case
-    vals     = np.array(list(ex.values()))
-    min_v, max_v = vals.min(), vals.max()
-    span     = max_v - min_v
-    hawkes_flat = span < 0.05   # all ETFs near-identical excitation
+    # Detect if Hawkes scores are flat (all near 1.0x — no meaningful excitation)
+    vals  = np.array(list(ex.values()))
+    span  = vals.max() - vals.min()
+    hawkes_flat = span < 0.05
 
     if hawkes_flat:
-        # Scores are flat — Hurst becomes the primary differentiator
         effective_hawkes_weight = 0.20
         effective_hurst_weight  = 0.80
         log.info("Option B: Hawkes scores flat — boosting Hurst weight to 80%")
@@ -130,7 +126,10 @@ def generate_signal_option_b(
         effective_hawkes_weight = HAWKES_WEIGHT
         effective_hurst_weight  = HURST_WEIGHT
 
-    ex_norm = {t: (v - min_v) / (span + 1e-9) for t, v in ex.items()}
+    # Normalise raw excitation ratios to [0,1] using global max
+    # (divide by max rather than min-max so that 1.00x ratios stay non-zero)
+    ex_max  = vals.max() if vals.max() > 0 else 1.0
+    ex_norm = {t: v / ex_max for t, v in ex.items()}
 
     # Get latest Hurst per ETF
     hurst_latest = {}
