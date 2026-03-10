@@ -157,8 +157,27 @@ def run_pipeline(
     intensity_df = build_intensity_history(fit_results, etf_returns.index)
     log.info(f"  Intensity history: {intensity_df.shape}")
 
-    # ── Step 8: Build signals DataFrame ──────────────────────────────────────
-    log.info("Step 8: Building signals DataFrame...")
+    # ── Step 8: Walk-forward backtest ─────────────────────────────────────────
+    log.info("Step 8: Running walk-forward backtest...")
+    try:
+        from walkforward import run_walkforward
+        wf_df = run_walkforward(
+            returns_df   = etf_returns,
+            volume_df    = volume_df,
+            bm_returns   = bm_returns,
+            event_def    = event_def,
+            train_window = 252,
+            step_size    = 21,
+        )
+        log.info(f"  Walk-forward: {len(wf_df)} OOS days "
+                 f"cum_A={wf_df['cum_A'].iloc[-1]:.3f} "
+                 f"cum_B={wf_df['cum_B'].iloc[-1]:.3f}")
+    except Exception as e:
+        log.error(f"Walk-forward failed: {e}")
+        wf_df = None
+
+    # ── Step 9: Build signals DataFrame ──────────────────────────────────────
+    log.info("Step 9: Building signals DataFrame...")
 
     # Build per-day signal history using rolling window approach
     # (simplified: just store today's signal for audit trail)
@@ -193,7 +212,7 @@ def run_pipeline(
 
     # ── Step 9: Save to HuggingFace ───────────────────────────────────────────
     if not skip_hf_write:
-        log.info("Step 9: Saving to HuggingFace...")
+        log.info("Step 10: Saving to HuggingFace...")
 
         # Update metadata
         metadata.update({
@@ -206,16 +225,20 @@ def run_pipeline(
             "dataset_version":   metadata.get("dataset_version", 1) + 1,
         })
 
+        save_files = {
+            "ohlcv_data.parquet":        ohlcv,
+            "signals_latest.parquet":    signals_df,
+            "intensity_history.parquet": intensity_df,
+            "hurst_history.parquet":     hurst_df,
+            "cross_excitation.parquet":  cross_matrix,
+            "hawkes_params.json":        params_dict,
+            "metadata.json":             metadata,
+        }
+        if wf_df is not None:
+            save_files["walkforward_returns.parquet"] = wf_df
+
         ok = save_to_hf(
-            files={
-                "ohlcv_data.parquet":        ohlcv,
-                "signals_latest.parquet":    signals_df,
-                "intensity_history.parquet": intensity_df,
-                "hurst_history.parquet":     hurst_df,
-                "cross_excitation.parquet":  cross_matrix,
-                "hawkes_params.json":        params_dict,
-                "metadata.json":             metadata,
-            },
+            files=save_files,
             commit_message=(
                 f"Daily update {datetime.utcnow().date()} — "
                 f"A:{sig_a['signal']} B:{sig_b['signal']}"
