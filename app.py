@@ -48,7 +48,7 @@ try:
         generate_signal_option_a, generate_signal_option_b,
         conviction_colour, etf_colour,
         next_trading_day_from_today, calculate_metrics,
-        calculate_benchmark_metrics,
+        calculate_benchmark_metrics, HAWKES_WEIGHT, HURST_WEIGHT,
     )
 except Exception as e:
     st.error(f"❌ Import error: {e}")
@@ -332,6 +332,133 @@ true_next_date = next_trading_day_from_today()
 # HELPER: render a full signal tab (shared by A and B)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def render_backtest_chart(sig: dict, option: str):
+    """
+    Compute and render a cumulative return chart for the Hawkes signal strategy
+    vs the selected benchmark, using pre-loaded OHLCV returns and intensity history.
+
+    Strategy logic (simplified daily):
+      - Each day, rank ETFs by their excitation ratio at that date
+      - Hold the top-ranked ETF for the next day
+      - Apply 5bps fee on rotation
+    """
+    if intensity_hist is None or intensity_hist.empty:
+        st.info("Intensity history not available — pipeline must run at least once.")
+        return
+
+    # ── Build daily signal series from intensity history ──────────────────────
+    # Align intensity history with available returns
+    common_idx = intensity_hist.index.intersection(etf_ret.index)
+    if len(common_idx) < 60:
+        st.info("Not enough history for backtest chart yet.")
+        return
+
+    int_hist   = intensity_hist.loc[common_idx]
+    ret_hist   = etf_ret.loc[common_idx]
+
+    # Reconstruct per-day excitation ratios and pick top ETF
+    daily_signal = []
+    for date in common_idx[:-1]:
+        next_date = common_idx[common_idx.get_loc(date) + 1]
+        ratios    = {}
+        for ticker in ETF_UNIVERSE:
+            if ticker not in int_hist.columns:
+                continue
+            p = params_dict.get(ticker, {})
+            mu = p.get("mu", 1e-6) if p else 1e-6
+            lam = float(int_hist.loc[date, ticker])
+            ratios[ticker] = lam / mu if mu > 1e-9 else 1.0
+
+        if option == "B" and hurst_df is not None:
+            # Apply Hurst weighting same as strategy.py
+            vals     = np.array(list(ratios.values()))
+            ex_max   = vals.max() if vals.max() > 0 else 1.0
+            ex_norm  = {t: v / ex_max for t, v in ratios.items()}
+            span     = vals.max() - vals.min()
+            hw = 0.20 if span < 0.05 else HAWKES_WEIGHT
+            rw = 0.80 if span < 0.05 else HURST_WEIGHT
+            scores = {}
+            for t in ETF_UNIVERSE:
+                if t not in ex_norm:
+                    continue
+                h_ser = hurst_df[t].dropna() if t in hurst_df.columns else pd.Series([0.5])
+                h_val = float(h_ser.asof(date)) if hasattr(h_ser, "asof") else float(h_ser.iloc[-1])
+                scores[t] = hw * ex_norm[t] + rw * float(np.clip(h_val, 0, 1))
+            top = max(scores, key=scores.get) if scores else list(ratios.keys())[0]
+        else:
+            top = max(ratios, key=ratios.get) if ratios else ETF_UNIVERSE[0]
+
+        daily_signal.append({"date": date, "signal": top, "next_date": next_date})
+
+    sig_series = pd.DataFrame(daily_signal).set_index("date")
+
+    # ── Compute strategy returns ───────────────────────────────────────────────
+    FEE     = 5 / 10_000
+    RF_DAY  = 0.045 / 252
+    strat   = []
+    prev    = None
+    for row in sig_series.itertuples():
+        etf      = row.signal
+        nd       = row.next_date
+        if etf in ret_hist.columns and nd in ret_hist.index:
+            raw_ret  = float(ret_hist.loc[nd, etf])
+            rotation = (prev is not None and prev != etf)
+            net      = raw_ret - (FEE if rotation else 0.0)
+        else:
+            net = RF_DAY
+        strat.append(net)
+        prev = etf
+
+    strat_arr = np.array(strat)
+    strat_cum = np.cumprod(1 + strat_arr)
+    dates_plt = sig_series.index[:len(strat_cum)]
+
+    # ── Benchmark returns ──────────────────────────────────────────────────────
+    bm_cum = None
+    bm_label = benchmark
+    if benchmark != "None" and benchmark in bm_ret.columns:
+        bm_r   = bm_ret[benchmark].reindex(dates_plt).fillna(0).values
+        bm_cum = np.cumprod(1 + bm_r)
+
+    # ── Annualised stats ───────────────────────────────────────────────────────
+    n        = len(strat_arr)
+    ann_ret  = float(strat_cum[-1] ** (252 / n) - 1) if n > 0 else 0.0
+    excess   = strat_arr - RF_DAY
+    sharpe   = float(np.mean(excess) / (np.std(excess) + 1e-9) * np.sqrt(252))
+    cum_max  = np.maximum.accumulate(strat_cum)
+    max_dd   = float(np.min((strat_cum - cum_max) / (cum_max + 1e-9)))
+
+    # ── Metrics row ───────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📈 Cumulative Return vs Benchmark")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Ann. Return",  f"{ann_ret:+.1%}")
+    m2.metric("Sharpe",       f"{sharpe:.2f}")
+    m3.metric("Max Drawdown", f"{max_dd:.1%}")
+    m4.metric("Days",         f"{n:,}")
+
+    # ── Chart ─────────────────────────────────────────────────────────────────
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dates_plt, y=strat_cum,
+        name=f"Option {option} Strategy",
+        line=dict(color="#4e79a7", width=2),
+    ))
+    if bm_cum is not None:
+        fig.add_trace(go.Scatter(
+            x=dates_plt, y=bm_cum,
+            name=bm_label,
+            line=dict(color="#aaaaaa", width=1.5, dash="dot"),
+        ))
+    fig.add_hline(y=1.0, line=dict(color="#e2e8f0", width=1))
+    fig.update_layout(
+        **CHART_LAYOUT, height=380,
+        yaxis_title="Cumulative Return (1 = starting value)",
+        title=f"Option {option} Strategy vs {benchmark}  |  5bps fee per rotation",
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"backtest_{option}")
+
+
 def render_signal_tab(sig: dict):
     option     = sig["option"]
     signal     = sig["signal"]
@@ -541,6 +668,9 @@ def render_signal_tab(sig: dict):
     else:
         st.info("No signal history yet — pipeline hasn't run.")
 
+    # ── Backtest chart ────────────────────────────────────────────────────────
+    render_backtest_chart(sig, option)
+
     # ── Model info caption ────────────────────────────────────────────────────
     if params_dict:
         fit_date = params_dict.get("fit_date", "unknown")
@@ -567,7 +697,7 @@ with tab_a:
 with tab_b:
     st.subheader("📈 Option B — Hawkes + Hurst Combined")
     st.caption(
-        "Conviction = 65% Hawkes excitation + 35% Hurst persistence. "
+        "Conviction = 50% Hawkes excitation + 50% Hurst persistence. "
         "Strong signal when both self-excitation AND long-run trend persistence align."
     )
     render_signal_tab(sig_b)
