@@ -143,6 +143,23 @@ def load_cross_excitation_from_hf() -> pd.DataFrame | None:
         return None
 
 
+def load_walkforward_from_hf() -> pd.DataFrame | None:
+    """Load walk-forward backtest results from HF."""
+    try:
+        path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="walkforward_returns.parquet",
+            repo_type="dataset",
+            token=_hf_token(),
+        )
+        df = pd.read_parquet(path)
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception as e:
+        log.warning(f"Could not load walk-forward results from HF: {e}")
+        return None
+
+
 def load_params_from_hf() -> dict | None:
     """Load fitted Hawkes parameters JSON from HF."""
     try:
