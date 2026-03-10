@@ -575,55 +575,48 @@ def select_best_event_def(
     n_days_oos: int = 252,
 ) -> str:
     """
-    Compare all three event definitions by out-of-sample predictive accuracy.
-    Uses a simple forward-return hit ratio:
-      After a Hawkes event (high excitation), does the ranked ETF outperform?
+    Select best event definition by comparing average AIC across all ETFs.
+
+    Fast approach: fit each event definition on the TRAINING set only
+    (all data minus last n_days_oos). Lower average AIC = better model fit.
+    This runs in ~1-2 minutes vs the previous rolling OOS loop (~25+ minutes).
 
     Returns the best event definition string.
     """
-    results = {}
-    cutoff  = len(returns_df) - n_days_oos
+    cutoff    = len(returns_df) - n_days_oos
+    train_ret = returns_df.iloc[:cutoff]
+    train_vol = volume_df.iloc[:cutoff] if volume_df is not None else None
 
+    results = {}
     for ev_def in EVENT_DEFINITIONS.keys():
         try:
-            # Fit on train set
-            train_ret = returns_df.iloc[:cutoff]
-            train_vol = volume_df.iloc[:cutoff] if volume_df is not None else None
-            fit       = fit_all_etfs(train_ret, train_vol, event_def=ev_def)
-
-            if not fit:
-                continue
-
-            # Score on OOS set: did the top-ranked ETF have positive next-day return?
-            oos_ret = returns_df.iloc[cutoff:]
-            hits    = 0
-            total   = 0
-
-            for i in range(len(oos_ret) - 1):
-                # Compute signal using data up to today
-                sub_ret = returns_df.iloc[:cutoff + i + 1]
-                sub_vol = volume_df.iloc[:cutoff + i + 1] if volume_df is not None else None
-                sub_fit = fit_all_etfs(sub_ret, sub_vol, event_def=ev_def)
-                sig     = get_signal(sub_fit, sub_ret, sub_vol, ev_def)
-                top     = sig["signal"]
-
-                if top in oos_ret.columns and i + 1 < len(oos_ret):
-                    next_ret = float(oos_ret.iloc[i + 1][top])
-                    if next_ret > 0:
-                        hits += 1
-                    total += 1
-
-            hit_ratio = hits / total if total > 0 else 0.0
-            results[ev_def] = hit_ratio
-            log.info(f"Event def [{ev_def}]: OOS hit ratio = {hit_ratio:.3f}")
-
+            total_aic = 0.0
+            n_fitted  = 0
+            for ticker in ETF_UNIVERSE:
+                if ticker not in train_ret.columns:
+                    continue
+                ret    = train_ret[ticker].dropna()
+                vol    = train_vol[ticker].reindex(ret.index) if train_vol is not None and ticker in train_vol.columns else None
+                events = detect_events(ret, vol, method=ev_def)
+                ev_idx = get_event_times(events)
+                T      = float(len(ret))
+                if len(ev_idx) < 5:
+                    continue
+                # Fit exponential only for speed (power-law adds little info at selection stage)
+                p = fit_exponential(ev_idx, T, ticker, ev_def, n_starts=3)
+                total_aic += p.aic
+                n_fitted  += 1
+            avg_aic = total_aic / n_fitted if n_fitted > 0 else 1e9
+            results[ev_def] = avg_aic
+            log.info(f"Event def [{ev_def}]: avg AIC = {avg_aic:.2f} across {n_fitted} ETFs")
         except Exception as e:
-            log.error(f"Event def [{ev_def}] failed: {e}")
-            results[ev_def] = 0.0
+            log.error(f"Event def [{ev_def}] selection failed: {e}")
+            results[ev_def] = 1e9
 
     if not results:
         return "combined"
 
-    best = max(results, key=results.get)
-    log.info(f"Best event definition: {best} (hit ratio={results[best]:.3f})")
+    # Lower AIC = better
+    best = min(results, key=results.get)
+    log.info(f"Best event definition: {best} (avg AIC={results[best]:.2f})")
     return best
