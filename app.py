@@ -428,7 +428,7 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
         yaxis_title="Score",
         title=f"Option {option} Ranking",
     )
-    st.plotly_chart(fig_rank, use_container_width=True)
+    st.plotly_chart(fig_rank, use_container_width=True, key=f"rank_{option}")
 
     # ── Option B extra: Hurst details ─────────────────────────────────────────
     if option == "B" and "details" in sig:
@@ -465,7 +465,7 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
             yaxis_title="Intensity λ*(t)",
             title="Self-Exciting Intensity Over Time",
         )
-        st.plotly_chart(fig_int, use_container_width=True)
+        st.plotly_chart(fig_int, use_container_width=True, key=f"intensity_{option}")
 
     # ── Cross-ETF excitation heatmap ──────────────────────────────────────────
     st.divider()
@@ -489,7 +489,7 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
         margin=dict(l=0, r=0, t=30, b=0),
         title="Cross-ETF Excitation Matrix",
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, use_container_width=True, key=f"heatmap_{option}")
 
     # ── Hawkes parameters table ───────────────────────────────────────────────
     st.divider()
