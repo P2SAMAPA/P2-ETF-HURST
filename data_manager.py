@@ -28,15 +28,9 @@ BENCHMARKS      = ["SPY", "AGG"]
 ALL_TICKERS     = ETF_UNIVERSE + BENCHMARKS
 OHLCV_FIELDS    = ["Open", "High", "Low", "Close", "Volume"]
 
-# Browser-like session
-_session = requests.Session()
-_session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/91.0.4472.124 Safari/537.36"
-    )
-})
+# NOTE: No custom requests.Session passed to yfinance.
+# New yfinance versions manage their own curl_cffi session internally.
+# Passing a requests.Session causes: "Yahoo API requires curl_cffi session" error.
 
 
 # ── HuggingFace helpers ───────────────────────────────────────────────────────
@@ -181,7 +175,7 @@ def _fetch_ohlcv_yf(ticker: str, start: str, end: str) -> pd.DataFrame | None:
             raw = yf.download(
                 ticker, start=start, end=end,
                 progress=False, auto_adjust=True,
-                threads=False, session=_session,
+                threads=False,
             )
             if raw.empty:
                 raise ValueError(f"Empty YF response for {ticker}")
