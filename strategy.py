@@ -35,8 +35,8 @@ _EST = pytz.timezone("US/Eastern")
 BENCHMARKS   = ["SPY", "AGG"]
 
 # Conviction weights for Option B
-HAWKES_WEIGHT = 0.65
-HURST_WEIGHT  = 0.35
+HAWKES_WEIGHT = 0.50
+HURST_WEIGHT  = 0.50
 
 
 # ── Next trading day ──────────────────────────────────────────────────────────
