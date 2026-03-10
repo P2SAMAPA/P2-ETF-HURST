@@ -40,6 +40,7 @@ try:
         load_ohlcv_from_hf, load_signals_from_hf,
         load_intensity_history_from_hf, load_params_from_hf,
         load_hurst_history_from_hf, load_cross_excitation_from_hf,
+        load_walkforward_from_hf,
         get_returns, get_volume, ETF_UNIVERSE, BENCHMARKS,
     )
     from hawkes import EVENT_DEFINITIONS
@@ -89,6 +90,10 @@ def cached_load_hurst():
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_cross_excitation():
     return load_cross_excitation_from_hf()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_walkforward():
+    return load_walkforward_from_hf()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -258,6 +263,7 @@ with st.spinner("🧠 Loading model outputs from HuggingFace..."):
     signals_df     = cached_load_signals()
     hurst_df       = cached_load_hurst()
     cross_matrix   = cached_load_cross_excitation()
+    wf_df          = cached_load_walkforward()
 
 # ── Validate all outputs loaded ───────────────────────────────────────────────
 if params_dict is None:
@@ -334,129 +340,84 @@ true_next_date = next_trading_day_from_today()
 
 def render_backtest_chart(sig: dict, option: str):
     """
-    Compute and render a cumulative return chart for the Hawkes signal strategy
-    vs the selected benchmark, using pre-loaded OHLCV returns and intensity history.
-
-    Strategy logic (simplified daily):
-      - Each day, rank ETFs by their excitation ratio at that date
-      - Hold the top-ranked ETF for the next day
-      - Apply 5bps fee on rotation
+    Render walk-forward backtest cumulative return chart.
+    Pre-computed by train.py, loaded from HuggingFace — zero look-ahead.
     """
-    if intensity_hist is None or intensity_hist.empty:
-        st.info("Intensity history not available — pipeline must run at least once.")
-        return
+    from walkforward import compute_wf_metrics
 
-    # ── Build daily signal series from intensity history ──────────────────────
-    # Align intensity history with available returns
-    common_idx = intensity_hist.index.intersection(etf_ret.index)
-    if len(common_idx) < 60:
-        st.info("Not enough history for backtest chart yet.")
-        return
-
-    int_hist   = intensity_hist.loc[common_idx]
-    ret_hist   = etf_ret.loc[common_idx]
-
-    # Reconstruct per-day excitation ratios and pick top ETF
-    daily_signal = []
-    for date in common_idx[:-1]:
-        next_date = common_idx[common_idx.get_loc(date) + 1]
-        ratios    = {}
-        for ticker in ETF_UNIVERSE:
-            if ticker not in int_hist.columns:
-                continue
-            p = params_dict.get(ticker, {})
-            mu = p.get("mu", 1e-6) if p else 1e-6
-            lam = float(int_hist.loc[date, ticker])
-            ratios[ticker] = lam / mu if mu > 1e-9 else 1.0
-
-        if option == "B" and hurst_df is not None:
-            # Apply Hurst weighting same as strategy.py
-            vals     = np.array(list(ratios.values()))
-            ex_max   = vals.max() if vals.max() > 0 else 1.0
-            ex_norm  = {t: v / ex_max for t, v in ratios.items()}
-            span     = vals.max() - vals.min()
-            hw = 0.20 if span < 0.05 else HAWKES_WEIGHT
-            rw = 0.80 if span < 0.05 else HURST_WEIGHT
-            scores = {}
-            for t in ETF_UNIVERSE:
-                if t not in ex_norm:
-                    continue
-                h_ser = hurst_df[t].dropna() if t in hurst_df.columns else pd.Series([0.5])
-                h_val = float(h_ser.asof(date)) if hasattr(h_ser, "asof") else float(h_ser.iloc[-1])
-                scores[t] = hw * ex_norm[t] + rw * float(np.clip(h_val, 0, 1))
-            top = max(scores, key=scores.get) if scores else list(ratios.keys())[0]
-        else:
-            top = max(ratios, key=ratios.get) if ratios else ETF_UNIVERSE[0]
-
-        daily_signal.append({"date": date, "signal": top, "next_date": next_date})
-
-    sig_series = pd.DataFrame(daily_signal).set_index("date")
-
-    # ── Compute strategy returns ───────────────────────────────────────────────
-    FEE     = 5 / 10_000
-    RF_DAY  = 0.045 / 252
-    strat   = []
-    prev    = None
-    for row in sig_series.itertuples():
-        etf      = row.signal
-        nd       = row.next_date
-        if etf in ret_hist.columns and nd in ret_hist.index:
-            raw_ret  = float(ret_hist.loc[nd, etf])
-            rotation = (prev is not None and prev != etf)
-            net      = raw_ret - (FEE if rotation else 0.0)
-        else:
-            net = RF_DAY
-        strat.append(net)
-        prev = etf
-
-    strat_arr = np.array(strat)
-    strat_cum = np.cumprod(1 + strat_arr)
-    dates_plt = sig_series.index[:len(strat_cum)]
-
-    # ── Benchmark returns ──────────────────────────────────────────────────────
-    bm_cum = None
-    bm_label = benchmark
-    if benchmark != "None" and benchmark in bm_ret.columns:
-        bm_r   = bm_ret[benchmark].reindex(dates_plt).fillna(0).values
-        bm_cum = np.cumprod(1 + bm_r)
-
-    # ── Annualised stats ───────────────────────────────────────────────────────
-    n        = len(strat_arr)
-    ann_ret  = float(strat_cum[-1] ** (252 / n) - 1) if n > 0 else 0.0
-    excess   = strat_arr - RF_DAY
-    sharpe   = float(np.mean(excess) / (np.std(excess) + 1e-9) * np.sqrt(252))
-    cum_max  = np.maximum.accumulate(strat_cum)
-    max_dd   = float(np.min((strat_cum - cum_max) / (cum_max + 1e-9)))
-
-    # ── Metrics row ───────────────────────────────────────────────────────────
     st.divider()
-    st.subheader("📈 Cumulative Return vs Benchmark")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Ann. Return",  f"{ann_ret:+.1%}")
-    m2.metric("Sharpe",       f"{sharpe:.2f}")
-    m3.metric("Max Drawdown", f"{max_dd:.1%}")
-    m4.metric("Days",         f"{n:,}")
+    st.subheader("📈 Walk-Forward Backtest vs Benchmark")
+    st.caption(
+        "Proper OOS backtest: 252-day rolling train window, "
+        "21-day step-forward, refit monthly. 5bps fee per rotation. "
+        "No look-ahead bias."
+    )
 
-    # ── Chart ─────────────────────────────────────────────────────────────────
+    if wf_df is None or wf_df.empty:
+        st.info(
+            "Walk-forward results not yet available — "
+            "trigger the **Daily Training Pipeline** and check back after it completes."
+        )
+        return
+
+    cum_col = f"cum_{option}"
+    ret_col = f"ret_{option}"
+    if cum_col not in wf_df.columns:
+        st.info(f"Column {cum_col} not found in walk-forward results.")
+        return
+
+    metrics = compute_wf_metrics(wf_df, option)
+    bm_ann, bm_sharpe, bm_dd = 0.0, 0.0, 0.0
+    has_bm = False
+    if benchmark != "None" and f"cum_{benchmark}" in wf_df.columns:
+        bm_rets  = wf_df[f"ret_{benchmark}"].values
+        bm_cum_v = wf_df[f"cum_{benchmark}"].values
+        n_bm     = len(bm_rets)
+        bm_ann   = float(bm_cum_v[-1] ** (252 / n_bm) - 1) if n_bm > 0 else 0.0
+        bm_sharpe = float(np.mean(bm_rets - 0.045/252) /
+                          (np.std(bm_rets) + 1e-9) * np.sqrt(252))
+        bm_cmax  = np.maximum.accumulate(bm_cum_v)
+        bm_dd    = float(np.min((bm_cum_v - bm_cmax) / (bm_cmax + 1e-9)))
+        has_bm   = True
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Ann. Return", f"{metrics['ann_return']:+.1%}",
+        delta=f"{metrics['ann_return'] - bm_ann:+.1%} vs {benchmark}" if has_bm else None,
+    )
+    c2.metric(
+        "Sharpe", f"{metrics['sharpe']:.2f}",
+        delta=f"{metrics['sharpe'] - bm_sharpe:+.2f} vs {benchmark}" if has_bm else None,
+    )
+    c3.metric(
+        "Max Drawdown", f"{metrics['max_dd']:.1%}",
+        delta=f"{metrics['max_dd'] - bm_dd:+.1%} vs {benchmark}" if has_bm else None,
+        delta_color="inverse",
+    )
+    c4.metric("OOS Days", f"{metrics['n_days']:,}")
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=dates_plt, y=strat_cum,
-        name=f"Option {option} Strategy",
+        x=wf_df.index, y=wf_df[cum_col],
+        name=f"Option {option} (Walk-Forward OOS)",
         line=dict(color="#4e79a7", width=2),
     ))
-    if bm_cum is not None:
+    if has_bm:
         fig.add_trace(go.Scatter(
-            x=dates_plt, y=bm_cum,
-            name=bm_label,
+            x=wf_df.index, y=wf_df[f"cum_{benchmark}"],
+            name=benchmark,
             line=dict(color="#aaaaaa", width=1.5, dash="dot"),
         ))
     fig.add_hline(y=1.0, line=dict(color="#e2e8f0", width=1))
     fig.update_layout(
-        **CHART_LAYOUT, height=380,
-        yaxis_title="Cumulative Return (1 = starting value)",
-        title=f"Option {option} Strategy vs {benchmark}  |  5bps fee per rotation",
+        **CHART_LAYOUT, height=400,
+        yaxis_title="Cumulative Return (1 = start)",
+        title=(
+            f"Option {option} Walk-Forward OOS vs {benchmark}  |  "
+            "Train=252d · Step=21d · Fee=5bps"
+        ),
     )
-    st.plotly_chart(fig, use_container_width=True, key=f"backtest_{option}")
+    st.plotly_chart(fig, use_container_width=True, key=f"wf_chart_{option}")
 
 
 def render_signal_tab(sig: dict):
