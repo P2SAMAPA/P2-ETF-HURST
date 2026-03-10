@@ -17,7 +17,6 @@ import time
 import random
 import pandas as pd
 import yfinance as yf
-import requests
 from datetime import datetime
 from huggingface_hub import HfApi, CommitOperationAdd
 
@@ -30,15 +29,7 @@ START_DATE      = "2008-01-01"
 END_DATE        = datetime.today().strftime("%Y-%m-%d")
 OHLCV_FIELDS    = ["Open", "High", "Low", "Close", "Volume"]
 
-# Browser-like session to reduce YF rate limiting
-session = requests.Session()
-session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/91.0.4472.124 Safari/537.36"
-    )
-})
+# NOTE: No custom requests.Session — new yfinance manages its own curl_cffi session.
 
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -54,7 +45,6 @@ def fetch_ohlcv_yf(ticker: str, start: str, end: str) -> pd.DataFrame | None:
                 progress=False,
                 auto_adjust=True,
                 threads=False,
-                session=session,
             )
             if raw.empty:
                 raise ValueError(f"Empty response for {ticker}")
