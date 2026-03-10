@@ -101,15 +101,6 @@ with st.sidebar:
     st.divider()
 
     st.header("⚙️ Configuration")
-    conviction_gate = st.slider(
-        "Min Conviction Gate", min_value=0.1, max_value=0.8,
-        value=0.3, step=0.05,
-        help="Minimum conviction score to take a position (below = CASH)"
-    )
-    fee_bps = st.number_input(
-        "Transaction Fee (bps)", min_value=0, max_value=50,
-        value=5, step=1,
-    )
     st.divider()
 
     st.subheader("📊 Display")
@@ -341,7 +332,7 @@ true_next_date = next_trading_day_from_today()
 # HELPER: render a full signal tab (shared by A and B)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_signal_tab(sig: dict, rf_rate: float = 0.045):
+def render_signal_tab(sig: dict):
     option     = sig["option"]
     signal     = sig["signal"]
     conviction = sig["conviction"]
@@ -555,8 +546,7 @@ def render_signal_tab(sig: dict, rf_rate: float = 0.045):
         fit_date = params_dict.get("fit_date", "unknown")
         st.caption(
             f"Model fitted: **{fit_date}** · "
-            f"Event def: **{event_def}** · "
-            f"Conviction gate: **{conviction_gate:.2f}**"
+            f"Event def: **{event_def}**"
         )
 
 
