@@ -107,16 +107,30 @@ def generate_signal_option_b(
     For each ETF:
       combined_score = HAWKES_WEIGHT * excitation_norm + HURST_WEIGHT * hurst_score
 
-    The ETF with the highest combined_score is the signal.
+    Uses min-max normalisation with a guaranteed minimum spread so that
+    Hurst can differentiate ETFs even when Hawkes scores are nearly identical.
     """
     sig = get_signal(fit_results, returns_df, event_def=event_def)
     ex  = sig["excitation_ratios"]
 
     # Normalise excitation ratios to [0, 1]
-    vals   = np.array(list(ex.values()))
+    # If spread is very small (< 0.05), Hawkes scores are essentially flat —
+    # reduce Hawkes weight and let Hurst carry more weight in that case
+    vals     = np.array(list(ex.values()))
     min_v, max_v = vals.min(), vals.max()
-    span   = max_v - min_v + 1e-9
-    ex_norm = {t: (v - min_v) / span for t, v in ex.items()}
+    span     = max_v - min_v
+    hawkes_flat = span < 0.05   # all ETFs near-identical excitation
+
+    if hawkes_flat:
+        # Scores are flat — Hurst becomes the primary differentiator
+        effective_hawkes_weight = 0.20
+        effective_hurst_weight  = 0.80
+        log.info("Option B: Hawkes scores flat — boosting Hurst weight to 80%")
+    else:
+        effective_hawkes_weight = HAWKES_WEIGHT
+        effective_hurst_weight  = HURST_WEIGHT
+
+    ex_norm = {t: (v - min_v) / (span + 1e-9) for t, v in ex.items()}
 
     # Get latest Hurst per ETF
     hurst_latest = {}
@@ -136,14 +150,16 @@ def generate_signal_option_b(
         h     = hurst_latest.get(t, 0.5)
         h_sc  = hurst_conviction(h)
         ex_sc = ex_norm[t]
-        score = HAWKES_WEIGHT * ex_sc + HURST_WEIGHT * h_sc
+        score = effective_hawkes_weight * ex_sc + effective_hurst_weight * h_sc
         combined[t] = score
         details[t]  = {
-            "hawkes_score": round(ex_sc, 4),
-            "hurst_score":  round(h_sc,  4),
-            "hurst_H":      round(h,     4),
-            "hurst_label":  hurst_label(h),
-            "combined":     round(score, 4),
+            "hawkes_score":  round(ex_sc, 4),
+            "hurst_score":   round(h_sc,  4),
+            "hurst_H":       round(h,     4),
+            "hurst_label":   hurst_label(h),
+            "combined":      round(score, 4),
+            "hawkes_weight": effective_hawkes_weight,
+            "hurst_weight":  effective_hurst_weight,
         }
 
     ranked   = sorted(combined.items(), key=lambda x: -x[1])
@@ -158,14 +174,19 @@ def generate_signal_option_b(
     conv_label = _conviction_label(conviction)
 
     return {
-        "option":      "B",
-        "signal":      top_etf,
-        "conviction":  round(conviction, 4),
-        "label":       conv_label,
-        "ranked":      [(t, round(v, 4)) for t, v in ranked],
-        "excitation":  sig["excitation_ratios"],
-        "details":     details,
-        "method":      f"Hawkes ({HAWKES_WEIGHT:.0%}) + Hurst ({HURST_WEIGHT:.0%})",
+        "option":       "B",
+        "signal":       top_etf,
+        "conviction":   round(conviction, 4),
+        "label":        conv_label,
+        "ranked":       [(t, round(v, 4)) for t, v in ranked],
+        "excitation":   sig["excitation_ratios"],
+        "details":      details,
+        "hawkes_flat":  hawkes_flat,
+        "method":       (
+            f"Hurst-led ({effective_hurst_weight:.0%}) — Hawkes scores flat"
+            if hawkes_flat else
+            f"Hawkes ({effective_hawkes_weight:.0%}) + Hurst ({effective_hurst_weight:.0%})"
+        ),
     }
 
 
