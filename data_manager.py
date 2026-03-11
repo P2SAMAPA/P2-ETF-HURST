@@ -62,36 +62,63 @@ def load_metadata_from_hf()    -> dict | None:         return _load_json("metada
 
 def get_returns(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """Extract close prices and compute log returns.
-    Handles multiple column naming conventions:
-      - (TICKER, 'Close') MultiIndex tuples  ← old Hawkes HF data
-      - TICKER_close  (yfinance flat)
-      - close_TICKER
-      - TICKER        (close only, flat)
+    Handles all observed column formats:
+      - (TICKER, 'Close')        real MultiIndex tuples
+      - "('TLT', 'Close')"       stringified tuples (parquet round-trip artifact)
+      - TLT_close                yfinance flat
+      - TLT_close_tlt            yfinance multi-ticker artifact
+      - Close_TLT                inverted format
+    Priority: stringified tuples first (most common in this dataset), then flat.
     """
+    import re
     cols = ohlcv.columns.tolist()
+    if not cols:
+        return pd.DataFrame()
 
-    # MultiIndex tuples: (TICKER, 'Close')
+    # 1. Real MultiIndex tuples: (TICKER, 'Close')
     if isinstance(cols[0], tuple):
-        close_cols = [c for c in cols if c[1].lower() == 'close']
-        close = ohlcv[close_cols].copy()
-        close.columns = [c[0] for c in close_cols]
-        return np.log(close / close.shift(1))
+        close_cols = [c for c in cols if str(c[1]).lower() == 'close']
+        if close_cols:
+            close = ohlcv[close_cols].copy()
+            close.columns = [str(c[0]).upper() for c in close_cols]
+            return np.log(close / close.shift(1))
 
-    # TICKER_close format
-    close_cols = [c for c in cols if c.endswith("_close")]
+    # 2. Stringified tuples: "('TLT', 'Close')" or "('TLT', 'Close')"
+    if str(cols[0]).startswith("("):
+        close_cols = [c for c in cols
+                      if str(c).replace("'","").replace('"','').split(",")[-1]
+                         .strip().rstrip(") ").lower() == "close"]
+        if close_cols:
+            close = ohlcv[close_cols].copy()
+            close.columns = [
+                str(c).replace("'","").replace('"','')
+                      .lstrip("( ").split(",")[0].strip().upper()
+                for c in close_cols
+            ]
+            return np.log(close / close.shift(1))
+
+    # 3. TICKER_close_ticker: TLT_close_tlt (yfinance multi-ticker artifact)
+    close_cols = [c for c in cols if re.match(r'^[A-Za-z]+_close_[a-z]+$', str(c))]
     if close_cols:
         close = ohlcv[close_cols].copy()
-        close.columns = [c.replace("_close", "") for c in close_cols]
+        close.columns = [str(c).split("_")[0].upper() for c in close_cols]
         return np.log(close / close.shift(1))
 
-    # close_TICKER format
-    close_cols = [c for c in cols if c.startswith("close_")]
+    # 4. TICKER_close: TLT_close
+    close_cols = [c for c in cols if re.match(r'^[A-Za-z]+_close$', str(c), re.IGNORECASE)]
     if close_cols:
         close = ohlcv[close_cols].copy()
-        close.columns = [c.replace("close_", "") for c in close_cols]
+        close.columns = [str(c).split("_")[0].upper() for c in close_cols]
         return np.log(close / close.shift(1))
 
-    # Fallback — assume all columns are close prices
+    # 5. close_TICKER: close_TLT
+    close_cols = [c for c in cols if str(c).lower().startswith("close_")]
+    if close_cols:
+        close = ohlcv[close_cols].copy()
+        close.columns = [str(c).split("_", 1)[1].upper() for c in close_cols]
+        return np.log(close / close.shift(1))
+
+    # 6. Fallback
     return np.log(ohlcv / ohlcv.shift(1))
 
 
