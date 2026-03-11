@@ -116,20 +116,35 @@ def run_walkforward(
 
 
 def compute_wf_metrics(wf_df: pd.DataFrame, rf_rate: float = 0.045) -> dict:
-    rets    = wf_df["ret"].values
-    cum     = wf_df["cum_strategy"].values
+    # Handle both old Hawkes format (ret_A/ret_B) and new Hurst format (ret)
+    if "ret" in wf_df.columns:
+        ret_col = "ret"
+        cum_col = "cum_strategy"
+    elif "ret_A" in wf_df.columns:
+        ret_col = "ret_A"
+        cum_col = "cum_A"
+    else:
+        return {}
+
+    if cum_col not in wf_df.columns:
+        cum_vals = np.cumprod(1 + wf_df[ret_col].values)
+    else:
+        cum_vals = wf_df[cum_col].values
+
+    rets    = wf_df[ret_col].values
     n       = len(rets)
     rf_day  = rf_rate / 252
-    ann_ret = float(cum[-1] ** (252 / n) - 1) if n > 0 else 0.0
+    ann_ret = float(cum_vals[-1] ** (252 / n) - 1) if n > 0 else 0.0
     excess  = rets - rf_day
     sharpe  = float(np.mean(excess) / (np.std(excess) + 1e-9) * np.sqrt(252))
-    cum_max = np.maximum.accumulate(cum)
-    max_dd  = float(np.min((cum - cum_max) / (cum_max + 1e-9)))
+    cum_max = np.maximum.accumulate(cum_vals)
+    max_dd  = float(np.min((cum_vals - cum_max) / (cum_max + 1e-9)))
     hit     = float(np.mean(rets > rf_day))
     calmar  = ann_ret / (abs(max_dd) + 1e-9)
     return {
         "ann_return": ann_ret, "sharpe": sharpe,
         "max_dd": max_dd,     "hit_ratio": hit,
         "calmar": calmar,     "n_days": n,
-        "cum_final": float(cum[-1]),
+        "cum_final": float(cum_vals[-1]),
+        "ret_col": ret_col,   "cum_col": cum_col,
     }
