@@ -355,45 +355,78 @@ with tab_mtf:
 
     # ── Heatmap: ETF × Timeframe ──────────────────────────────────────────────
     st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
-    st.caption("Colour intensity = H value · Green = trending · Amber = random walk · Red = mean-reverting")
+    st.caption("H columns: Green = trending (H > 0.55) · Amber = random walk · Red = mean-reverting")
 
-    windows     = [("H63 Velocity", "h_short"), (f"H {MEDIUM_WINDOW}d", "h_medium"), (f"H {LONG_WINDOW}d", "h_long")]
+    # Build two separate heatmaps: velocity (col 0) and H values (cols 1-2)
+    # They have different scales and colour logic so must be rendered as subplots
     tickers_ord = [t for t in ETF_UNIVERSE if t in conviction]
-    z_vals, text_vals = [], []
+
+    vel_z, vel_t = [], []
+    h_z,   h_t   = [], []
+    h_windows = [(f"H {MEDIUM_WINDOW}d", "h_medium"), (f"H {LONG_WINDOW}d", "h_long")]
+
     for ticker in tickers_ord:
-        c = conviction[ticker]
+        c   = conviction[ticker]
+        vel = c.get("h_velocity", c.get("h_short", 0.0))
+        vel_z.append([vel])
+        vel_t.append([f"{vel:+.3f}<br>{velocity_label(vel)}"])
         row_z, row_t = [], []
-        for _, key in windows:
+        for _, key in h_windows:
             h = c.get(key, 0.5)
             row_z.append(h)
             row_t.append(f"{h:.3f}<br>{hurst_label(h)}")
-        z_vals.append(row_z)
-        text_vals.append(row_t)
+        h_z.append(row_z)
+        h_t.append(row_t)
 
-    fig_hm = go.Figure(go.Heatmap(
-        z=z_vals,
-        x=[w[0] for w in windows],
-        y=tickers_ord,
-        text=text_vals,
-        texttemplate="%{text}",
+    from plotly.subplots import make_subplots
+    fig_hm = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.33, 0.67],
+        horizontal_spacing=0.02,
+        shared_yaxes=True,
+    )
+
+    # Velocity column — diverging scale centred on 0 (-0.5 to +0.5)
+    fig_hm.add_trace(go.Heatmap(
+        z=vel_z, x=["H63 Velocity"], y=tickers_ord,
+        text=vel_t, texttemplate="%{text}",
         textfont=dict(size=12, family="DM Sans"),
         colorscale=[
-            [0.0,  "#dc2626"],   # red   — mean-reverting
-            [0.45, "#f97316"],   # orange
-            [0.55, "#d97706"],   # amber — random walk
-            [0.65, "#16a34a"],   # green — trending
-            [1.0,  "#052e16"],   # dark green — strong trend
+            [0.0,  "#dc2626"],   # strong negative — reversing
+            [0.35, "#f97316"],   # negative — decelerating
+            [0.50, "#d97706"],   # neutral
+            [0.65, "#65a30d"],   # positive — stable
+            [1.0,  "#16a34a"],   # strong positive — accelerating
+        ],
+        zmin=-0.5, zmax=0.5,
+        showscale=False,
+    ), row=1, col=1)
+
+    # H value columns — standard H scale
+    fig_hm.add_trace(go.Heatmap(
+        z=h_z, x=[w[0] for w in h_windows], y=tickers_ord,
+        text=h_t, texttemplate="%{text}",
+        textfont=dict(size=12, family="DM Sans"),
+        colorscale=[
+            [0.0,  "#dc2626"],
+            [0.45, "#f97316"],
+            [0.55, "#d97706"],
+            [0.65, "#16a34a"],
+            [1.0,  "#052e16"],
         ],
         zmin=0.3, zmax=0.9,
         showscale=True,
-        colorbar=dict(title="H", thickness=12, len=0.8),
-    ))
+        colorbar=dict(title="H", thickness=12, len=0.8, x=1.01),
+    ), row=1, col=2)
+
     fig_hm.update_layout(
         **CHART_LAYOUT, height=280,
         title=f"Hurst Heatmap — {ohlcv.index[-1].date()} | Velocity · {MEDIUM_WINDOW}d · {LONG_WINDOW}d",
         xaxis=dict(side="top"),
+        xaxis2=dict(side="top"),
         yaxis=dict(autorange="reversed"),
     )
+    st.caption("Velocity column: green = H63 accelerating ↑ · red = decelerating ↓ · scale: −0.5 to +0.5")
     st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_chart")
 
     st.divider()
