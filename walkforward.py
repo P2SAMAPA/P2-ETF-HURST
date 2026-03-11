@@ -1,24 +1,28 @@
 """
 walkforward.py — P2-ETF-HURST
 ================================
-Walk-forward backtest engine using Hurst Confluence signals.
-No model fitting — pure Hurst computation, very fast (~3-5 min total).
+Walk-forward backtest with DFA Hurst + in-fold momentum weight optimisation.
 
-Train window : 252 days (needed for divergence baseline)
-Step size    : 21 days (monthly rebalance)
+Each fold:
+  1. Compute DFA MTF Hurst on train window
+  2. Grid-search (mom_weight x w3m) to maximise in-sample Sharpe
+  3. Apply best blend to OOS period (21 days)
+
+Train window : 252 days
+Step size    : 21 days
 Fee          : 5bps per rotation
 """
 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
 from hurst_core import (
     compute_all_mtf, compute_divergence_scores,
     compute_sync_score, compute_conviction_scores,
+    compute_momentum_scores, optimise_momentum_weights,
     generate_signal, build_mtf_history,
     ETF_UNIVERSE, BENCHMARKS,
 )
@@ -29,14 +33,13 @@ FEE          = 5 / 10_000
 
 
 def run_walkforward(
-    returns_df: pd.DataFrame,
-    bm_returns: pd.DataFrame,
+    returns_df:   pd.DataFrame,
+    bm_returns:   pd.DataFrame,
     train_window: int = TRAIN_WINDOW,
     step_size:    int = STEP_SIZE,
 ) -> pd.DataFrame:
     """
-    Walk-forward backtest using Hurst Confluence scores.
-    Each fold: compute MTF Hurst on train window → signal for next 21 days.
+    Walk-forward backtest using DFA Hurst Confluence + optimised momentum blend.
     """
     etf_cols = [t for t in ETF_UNIVERSE if t in returns_df.columns]
     n        = len(returns_df)
@@ -45,40 +48,57 @@ def run_walkforward(
     if n < train_window + step_size:
         raise ValueError(f"Need {train_window + step_size} rows, have {n}")
 
-    log.info(f"Walk-forward: {n} days, train={train_window}, step={step_size}")
     total_folds = (n - train_window) // step_size
-    log.info(f"Folds: {total_folds}")
+    log.info(f"Walk-forward: {n} days, train={train_window}, step={step_size}, folds={total_folds}")
 
-    records  = []
-    prev_sig = None
+    records   = []
+    prev_sig  = None
+    # Cache optimised weights — re-optimise every 63 days (quarterly)
+    cached_mom_w = 0.20
+    cached_w3m   = 0.50
+    last_opt_fold = -999
 
     for fold_i, fold_start in enumerate(range(train_window, n - 1, step_size)):
-        oos_end = min(fold_start + step_size, n - 1)
-
+        oos_end   = min(fold_start + step_size, n - 1)
         train_ret = returns_df.iloc[fold_start - train_window: fold_start][etf_cols]
 
         if fold_i % 20 == 0:
             log.info(f"  Fold {fold_i+1}/{total_folds}: "
-                     f"train [{dates[fold_start - train_window].date()} → "
+                     f"[{dates[fold_start - train_window].date()} -> "
                      f"{dates[fold_start - 1].date()}] "
-                     f"OOS [{dates[fold_start].date()} → "
-                     f"{dates[min(oos_end, n-1) - 1].date()}]")
+                     f"OOS [{dates[fold_start].date()}]")
 
-        # ── Compute Hurst on train window ──────────────────────────────────
         try:
+            # -- Hurst conviction scores --
             mtf_today  = compute_all_mtf(train_ret)
-            # Build a mini MTF history for divergence (last 252 days of train)
             mtf_hist   = build_mtf_history(train_ret, step=5)
             div_scores = compute_divergence_scores(mtf_today, mtf_hist)
             sync       = compute_sync_score(mtf_today)
             conviction = compute_conviction_scores(mtf_today, div_scores, sync)
-            sig        = generate_signal(conviction)
-            signal     = sig["signal"]
+
+            # -- Optimise momentum weights (quarterly re-optimisation) --
+            if (fold_i - last_opt_fold) >= 3:
+                cached_mom_w, cached_w3m = optimise_momentum_weights(
+                    train_ret, conviction, train_window=train_window
+                )
+                last_opt_fold = fold_i
+                log.info(f"    Optimised: mom_w={cached_mom_w:.2f} w3m={cached_w3m:.2f}")
+
+            # -- Momentum scores with optimised w3m --
+            mom_scores = compute_momentum_scores(train_ret, w3m=cached_w3m)
+
+            # -- Final signal --
+            sig_dict = generate_signal(
+                conviction, mom_scores,
+                mom_weight=cached_mom_w, w3m=cached_w3m,
+            )
+            signal = sig_dict["signal"]
+
         except Exception as e:
-            log.warning(f"Fold {fold_i}: Hurst failed ({e}), holding previous")
+            log.warning(f"Fold {fold_i}: failed ({e}), holding previous")
             signal = prev_sig if prev_sig else etf_cols[0]
 
-        # ── Apply signal over OOS period ───────────────────────────────────
+        # -- Apply signal over OOS period --
         for day_i in range(fold_start, oos_end):
             if day_i + 1 >= n:
                 break
@@ -97,7 +117,11 @@ def run_walkforward(
                 bm_rets[f"ret_{bm}"] = float(bm_returns.loc[next_day, bm]) \
                     if next_day in bm_returns.index else 0.0
 
-            records.append({"date": date, "signal": signal, "ret": ret, **bm_rets})
+            records.append({
+                "date": date, "signal": signal, "ret": ret,
+                "mom_weight": cached_mom_w, "w3m": cached_w3m,
+                **bm_rets,
+            })
             prev_sig = signal
 
     if not records:
@@ -116,7 +140,7 @@ def run_walkforward(
 
 
 def compute_wf_metrics(wf_df: pd.DataFrame, rf_rate: float = 0.045) -> dict:
-    # Handle both old Hawkes format (ret_A/ret_B) and new Hurst format (ret)
+    # Handle both new (ret/cum_strategy) and old Hawkes (ret_A/cum_A) column names
     if "ret" in wf_df.columns:
         ret_col = "ret"
         cum_col = "cum_strategy"
@@ -131,9 +155,9 @@ def compute_wf_metrics(wf_df: pd.DataFrame, rf_rate: float = 0.045) -> dict:
     else:
         cum_vals = wf_df[cum_col].values
 
-    rets    = wf_df[ret_col].values
-    n       = len(rets)
-    rf_day  = rf_rate / 252
+    rets   = wf_df[ret_col].values
+    n      = len(rets)
+    rf_day = rf_rate / 252
     ann_ret = float(cum_vals[-1] ** (252 / n) - 1) if n > 0 else 0.0
     excess  = rets - rf_day
     sharpe  = float(np.mean(excess) / (np.std(excess) + 1e-9) * np.sqrt(252))
@@ -141,6 +165,7 @@ def compute_wf_metrics(wf_df: pd.DataFrame, rf_rate: float = 0.045) -> dict:
     max_dd  = float(np.min((cum_vals - cum_max) / (cum_max + 1e-9)))
     hit     = float(np.mean(rets > rf_day))
     calmar  = ann_ret / (abs(max_dd) + 1e-9)
+
     return {
         "ann_return": ann_ret, "sharpe": sharpe,
         "max_dd": max_dd,     "hit_ratio": hit,
