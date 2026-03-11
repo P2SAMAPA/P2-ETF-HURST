@@ -292,7 +292,7 @@ def compute_divergence_scores(
 def compute_sync_score(mtf_today: dict) -> dict:
     h_vals = {t: mtf_today[t]["h_medium"] for t in ETF_UNIVERSE if t in mtf_today}
     if not h_vals:
-        return {"sync_level": 0.5, "scores": {t: 0.0 for t in ETF_UNIVERSE}}
+        return {"sync_level": 0.5, "h_mean": 0.5, "h_std": 0.0, "scores": {t: 0.0 for t in ETF_UNIVERSE}}
 
     arr        = np.array(list(h_vals.values()))
     h_mean     = float(np.mean(arr))
