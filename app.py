@@ -230,7 +230,7 @@ with tab_signal:
                    "#f59e0b" if conv_label == "Moderate" else "#ef4444")
 
     # Next trading day from last data date
-    next_trade_day = pd.offsets.BDay(1).apply(ohlcv.index[-1]).date()
+    next_trade_day = (ohlcv.index[-1] + pd.offsets.BDay(1)).date()
 
     st.markdown(f"""
     <div class="hero-card">
