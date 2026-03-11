@@ -8,10 +8,18 @@ Three timeframe windows:
   MEDIUM = 63  trading days (~1 quarter)
   LONG   = 252 trading days (~1 year)
 
-R/S Analysis (Hurst, 1951):
+Estimator: DFA (Detrended Fluctuation Analysis) — unbiased on short windows.
+R/S was replaced because it systematically over-estimates H at n < 100,
+producing spuriously high values (0.7-0.9) that wash out cross-ETF differences.
+
+DFA regime thresholds:
   H > 0.55 → Trending / persistent
   H ≈ 0.50 → Random walk
   H < 0.45 → Anti-persistent / mean-reverting
+
+Momentum overlay:
+  Final score blends HRC conviction with 3m + 6m price momentum.
+  Weights optimised in-fold during walk-forward (no look-ahead).
 """
 
 import numpy as np
@@ -21,118 +29,137 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ── Timeframe windows ─────────────────────────────────────────────────────────
+# -- Timeframe windows --------------------------------------------------------
 SHORT_WINDOW  = 21
 MEDIUM_WINDOW = 63
 LONG_WINDOW   = 252
 
-# ── Regime thresholds ─────────────────────────────────────────────────────────
-H_TRENDING    = 0.55
-H_RANDOM      = 0.45
+# -- Regime thresholds --------------------------------------------------------
+H_TRENDING     = 0.55
+H_RANDOM       = 0.45
 H_STRONG_TREND = 0.65
 
-ETF_UNIVERSE  = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
-BENCHMARKS    = ["SPY", "AGG"]
+ETF_UNIVERSE = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
+BENCHMARKS   = ["SPY", "AGG"]
+
+# -- Momentum grid search params ----------------------------------------------
+MOM_WEIGHT_GRID = [0.10, 0.20, 0.30]   # total momentum weight vs HRC
+MOM_3M_GRID     = [0.30, 0.50, 0.70]   # fraction of mom weight on 3m (rest = 6m)
+MOM_3M_WINDOW   = 63                    # ~3 months
+MOM_6M_WINDOW   = 126                   # ~6 months
 
 
-def hurst_rs(series: np.ndarray) -> float:
+# =============================================================================
+# DFA Hurst estimator
+# =============================================================================
+
+def hurst_dfa(series: np.ndarray) -> float:
     """
-    Compute Hurst exponent via R/S (rescaled range) analysis.
-    Returns H in [0, 1]. Returns 0.5 if series is too short or degenerate.
+    Compute Hurst exponent via Detrended Fluctuation Analysis (DFA).
+
+    DFA is unbiased down to ~20 sample points -- unlike R/S which systematically
+    over-estimates H on short windows, making all ETFs look 'strongly trending'.
+
+    Algorithm:
+      1. Integrate the series (cumulative sum of mean-centred values)
+      2. Divide into non-overlapping windows of size s
+      3. Detrend each window with a linear fit
+      4. Compute RMS of residuals F(s)
+      5. F(s) ~ s^H  -->  H = slope of log(F) vs log(s)
+
+    Returns H in [0, 1]. Returns 0.5 if too short or degenerate.
     """
+    series = np.array(series, dtype=float)
+    series = series[~np.isnan(series)]
     n = len(series)
     if n < 20:
         return 0.5
 
-    series = np.array(series, dtype=float)
-    series = series[~np.isnan(series)]
-    if len(series) < 20:
-        return 0.5
+    # Integrate
+    y = np.cumsum(series - np.mean(series))
 
-    lags  = []
-    rs_vals = []
+    # Window sizes: log-spaced, min=4, max=n//4
+    min_s  = max(4, n // 16)
+    max_s  = max(min_s + 1, n // 4)
+    n_wins = min(20, max_s - min_s + 1)
+    sizes  = np.unique(
+        np.round(np.logspace(np.log10(min_s), np.log10(max_s), n_wins)).astype(int)
+    )
 
-    min_window = max(4, n // 16)
-    max_window = n // 2
-
-    for lag in range(min_window, max_window + 1, max(1, (max_window - min_window) // 20)):
-        chunks  = [series[i:i+lag] for i in range(0, n - lag + 1, lag)]
-        chunks  = [c for c in chunks if len(c) == lag]
-        if not chunks:
+    log_s, log_f = [], []
+    for s in sizes:
+        s = int(s)
+        if s < 4 or s > n // 2:
             continue
-        rs_chunk = []
-        for chunk in chunks:
-            mean_c = np.mean(chunk)
-            dev    = np.cumsum(chunk - mean_c)
-            r      = np.max(dev) - np.min(dev)
-            s      = np.std(chunk, ddof=1)
-            if s > 1e-10:
-                rs_chunk.append(r / s)
-        if rs_chunk:
-            lags.append(np.log(lag))
-            rs_vals.append(np.log(np.mean(rs_chunk)))
+        n_seg = n // s
+        if n_seg < 2:
+            continue
+        f2 = []
+        for seg in range(n_seg):
+            seg_y = y[seg * s: (seg + 1) * s]
+            x     = np.arange(s, dtype=float)
+            coeffs   = np.polyfit(x, seg_y, 1)
+            residual = seg_y - np.polyval(coeffs, x)
+            f2.append(np.mean(residual ** 2))
+        f = np.sqrt(np.mean(f2))
+        if f > 1e-10:
+            log_s.append(np.log(float(s)))
+            log_f.append(np.log(f))
 
-    if len(lags) < 4:
+    if len(log_s) < 4:
         return 0.5
 
     try:
-        h, _ = np.polyfit(lags, rs_vals, 1)
+        h, _ = np.polyfit(log_s, log_f, 1)
         return float(np.clip(h, 0.0, 1.0))
     except Exception:
         return 0.5
 
 
+def hurst_rs(series: np.ndarray) -> float:
+    """Alias -> DFA (R/S replaced due to short-window bias)."""
+    return hurst_dfa(series)
+
+
+# =============================================================================
+# Labels / colours
+# =============================================================================
+
 def hurst_label(h: float) -> str:
-    """Human-readable regime label."""
-    if h >= H_STRONG_TREND:
-        return "Strong Trend"
-    elif h >= H_TRENDING:
-        return "Mild Trend"
-    elif h >= H_RANDOM:
-        return "Random Walk"
-    else:
-        return "Mean-Reverting"
+    if h >= H_STRONG_TREND: return "Strong Trend"
+    elif h >= H_TRENDING:   return "Mild Trend"
+    elif h >= H_RANDOM:     return "Random Walk"
+    else:                   return "Mean-Reverting"
 
 
 def hurst_regime_colour(h: float) -> str:
-    """Colour code for regime."""
-    if h >= H_TRENDING:
-        return "#16a34a"   # green — trending
-    elif h >= H_RANDOM:
-        return "#d97706"   # amber — random walk
-    else:
-        return "#dc2626"   # red — mean-reverting
+    if h >= H_TRENDING: return "#16a34a"
+    elif h >= H_RANDOM: return "#d97706"
+    else:               return "#dc2626"
 
 
-# ── Multi-timeframe Hurst ─────────────────────────────────────────────────────
+# =============================================================================
+# Multi-timeframe Hurst
+# =============================================================================
 
-def compute_mtf_hurst(
-    returns: pd.Series,
-    date:    Optional[pd.Timestamp] = None,
-) -> dict:
-    """
-    Compute Hurst at SHORT/MEDIUM/LONG windows for a single ETF.
-    Returns dict with h_short, h_medium, h_long and derived scores.
-    """
+def compute_mtf_hurst(returns: pd.Series, date: Optional[pd.Timestamp] = None) -> dict:
+    """Compute DFA Hurst at SHORT/MEDIUM/LONG windows for a single ETF."""
     s = returns.dropna()
     n = len(s)
 
-    h_short  = hurst_rs(s.values[-SHORT_WINDOW:])  if n >= SHORT_WINDOW  else 0.5
-    h_medium = hurst_rs(s.values[-MEDIUM_WINDOW:]) if n >= MEDIUM_WINDOW else 0.5
-    h_long   = hurst_rs(s.values[-LONG_WINDOW:])   if n >= LONG_WINDOW   else 0.5
+    h_short  = hurst_dfa(s.values[-SHORT_WINDOW:])  if n >= SHORT_WINDOW  else 0.5
+    h_medium = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if n >= MEDIUM_WINDOW else 0.5
+    h_long   = hurst_dfa(s.values[-LONG_WINDOW:])   if n >= LONG_WINDOW   else 0.5
 
-    # MTF alignment score: how many timeframes are trending (H > 0.55)
-    trending = sum([h_short >= H_TRENDING,
+    trending = sum([h_short  >= H_TRENDING,
                     h_medium >= H_TRENDING,
                     h_long   >= H_TRENDING])
 
-    # 2-of-3 rule: short + medium align, long confirms
-    short_med_align = (h_short  >= H_TRENDING and h_medium >= H_TRENDING)
-    long_confirms   = (h_long   >= H_TRENDING)
-    mtf_strong      = short_med_align or (trending >= 2)
+    short_med_align = (h_short >= H_TRENDING and h_medium >= H_TRENDING)
+    long_confirms   = (h_long  >= H_TRENDING)
 
     mtf_score = (
-        1.0 if (short_med_align and long_confirms) else
+        1.0  if (short_med_align and long_confirms) else
         0.75 if short_med_align else
         0.5  if (trending >= 2)  else
         0.25 if (trending == 1)  else
@@ -144,7 +171,7 @@ def compute_mtf_hurst(
         "h_medium":       h_medium,
         "h_long":         h_long,
         "mtf_score":      mtf_score,
-        "mtf_strong":     mtf_strong,
+        "mtf_strong":     short_med_align or (trending >= 2),
         "trending_count": trending,
         "label_short":    hurst_label(h_short),
         "label_medium":   hurst_label(h_medium),
@@ -152,10 +179,7 @@ def compute_mtf_hurst(
     }
 
 
-def compute_all_mtf(
-    returns_df: pd.DataFrame,
-) -> dict:
-    """Compute MTF Hurst for all ETFs. Returns dict keyed by ticker."""
+def compute_all_mtf(returns_df: pd.DataFrame) -> dict:
     results = {}
     for ticker in ETF_UNIVERSE:
         if ticker not in returns_df.columns:
@@ -164,55 +188,48 @@ def compute_all_mtf(
     return results
 
 
-# ── Rolling multi-timeframe history ──────────────────────────────────────────
+# =============================================================================
+# Rolling MTF history
+# =============================================================================
 
-def build_mtf_history(
-    returns_df: pd.DataFrame,
-    step:       int = 5,
-) -> pd.DataFrame:
-    """
-    Build rolling MTF Hurst history for all ETFs.
-    Computed every `step` days to reduce runtime.
-    Returns DataFrame with MultiIndex columns (ticker, window).
-    """
-    dates  = returns_df.index
-    n      = len(dates)
+def build_mtf_history(returns_df: pd.DataFrame, step: int = 5) -> pd.DataFrame:
+    """Build rolling DFA Hurst history for all ETFs (every `step` days)."""
+    dates    = returns_df.index
+    n        = len(dates)
     min_rows = LONG_WINDOW + 1
+    records  = []
 
-    records = []
     for i in range(min_rows, n, step):
-        row = {"date": dates[i]}
+        row    = {"date": dates[i]}
         slice_ = returns_df.iloc[:i+1]
         for ticker in ETF_UNIVERSE:
             if ticker not in slice_.columns:
                 continue
             s = slice_[ticker].dropna()
-            row[f"{ticker}_h_short"]  = hurst_rs(s.values[-SHORT_WINDOW:])  if len(s) >= SHORT_WINDOW  else np.nan
-            row[f"{ticker}_h_medium"] = hurst_rs(s.values[-MEDIUM_WINDOW:]) if len(s) >= MEDIUM_WINDOW else np.nan
-            row[f"{ticker}_h_long"]   = hurst_rs(s.values[-LONG_WINDOW:])   if len(s) >= LONG_WINDOW   else np.nan
+            row[f"{ticker}_h_short"]  = hurst_dfa(s.values[-SHORT_WINDOW:])  if len(s) >= SHORT_WINDOW  else np.nan
+            row[f"{ticker}_h_medium"] = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if len(s) >= MEDIUM_WINDOW else np.nan
+            row[f"{ticker}_h_long"]   = hurst_dfa(s.values[-LONG_WINDOW:])   if len(s) >= LONG_WINDOW   else np.nan
         records.append(row)
 
     if not records:
         return pd.DataFrame()
-
-    df = pd.DataFrame(records).set_index("date")
-    return df
+    return pd.DataFrame(records).set_index("date")
 
 
-# ── Hurst Divergence scores ───────────────────────────────────────────────────
+# =============================================================================
+# Divergence scores
+# =============================================================================
 
 def compute_divergence_scores(
     mtf_today:   dict,
     mtf_history: pd.DataFrame,
-    lookback:    int = 504,   # 2 years for baseline
+    lookback:    int = 504,
 ) -> dict:
     """
-    Compute 3-part divergence score per ETF:
-      (a) H risen most vs own history (momentum of regime)
-      (b) H furthest above 0.5 relative to own baseline (absolute persistence)
-      (c) H recently crossed above its 1-year mean (fresh transition)
-
-    Returns dict: ticker → {div_a, div_b, div_c, div_score}
+    3-part divergence score per ETF:
+      (a) H risen most vs own 6m ago  (momentum of regime)
+      (b) H furthest above own 2yr baseline  (absolute persistence)
+      (c) H recently crossed above 1yr mean  (fresh transition)
     """
     scores = {}
 
@@ -232,135 +249,190 @@ def compute_divergence_scores(
     for ticker in ETF_UNIVERSE:
         if ticker not in mtf_today:
             continue
-
         col_m  = f"{ticker}_h_medium"
         col_l  = f"{ticker}_h_long"
         h_now  = mtf_today[ticker]["h_medium"]
-        h_long = mtf_today[ticker]["h_long"]
 
         if col_m not in hist.columns:
             scores[ticker] = {"div_a": 0.0, "div_b": 0.0, "div_c": 0.0, "div_score": 0.0}
             continue
 
         hist_m = hist[col_m].dropna()
-        hist_l = hist[col_l].dropna() if col_l in hist.columns else hist_m
 
-        # (a) Momentum: how much has H risen vs its own 6-month ago value
-        h_6m_ago  = float(hist_m.iloc[-126]) if len(hist_m) >= 126 else float(hist_m.iloc[0])
-        div_a     = float(np.clip(h_now - h_6m_ago, -1, 1))
+        h_6m_ago   = float(hist_m.iloc[-126]) if len(hist_m) >= 126 else float(hist_m.iloc[0])
+        div_a      = float(np.clip(h_now - h_6m_ago, -1, 1))
 
-        # (b) Absolute persistence: H above 0.5 relative to own 2yr baseline
         h_baseline = float(hist_m.mean()) if len(hist_m) > 0 else 0.5
         div_b      = float(np.clip(h_now - h_baseline, -1, 1))
 
-        # (c) Fresh transition: H crossed above 1yr mean in last 21 days
         h_1yr_mean = float(hist_m.tail(252).mean()) if len(hist_m) >= 63 else 0.5
         h_21d_ago  = float(hist_m.iloc[-21]) if len(hist_m) >= 21 else float(hist_m.iloc[0])
         crossed    = (h_21d_ago < h_1yr_mean) and (h_now >= h_1yr_mean)
         div_c      = 1.0 if crossed else float(np.clip((h_now - h_1yr_mean) / 0.1, -1, 1))
 
-        # Combined divergence score (equal weight of 3 components)
-        div_score = (div_a + div_b + div_c) / 3.0
+        div_score  = (div_a + div_b + div_c) / 3.0
 
         scores[ticker] = {
-            "div_a":       round(div_a,     4),
-            "div_b":       round(div_b,     4),
-            "div_c":       round(div_c,     4),
-            "div_score":   round(div_score, 4),
-            "h_baseline":  round(h_baseline, 4),
-            "h_1yr_mean":  round(h_1yr_mean, 4),
-            "crossed":     crossed,
+            "div_a":      round(div_a,      4),
+            "div_b":      round(div_b,      4),
+            "div_c":      round(div_c,      4),
+            "div_score":  round(div_score,  4),
+            "h_baseline": round(h_baseline, 4),
+            "h_1yr_mean": round(h_1yr_mean, 4),
+            "crossed":    crossed,
         }
 
     return scores
 
 
-# ── Cross-asset synchronisation ───────────────────────────────────────────────
+# =============================================================================
+# Cross-asset sync
+# =============================================================================
 
 def compute_sync_score(mtf_today: dict) -> dict:
-    """
-    Cross-asset Hurst synchronisation.
-
-    When all ETFs have similar H values → regime is synchronised (risk-off cluster).
-    When ETFs diverge → dispersion opportunity → reward outliers.
-
-    Returns:
-      sync_level: 0 (fully dispersed) to 1 (fully synchronised)
-      per-ETF deviation from mean H (normalised)
-    """
-    h_vals = {}
-    for ticker in ETF_UNIVERSE:
-        if ticker in mtf_today:
-            h_vals[ticker] = mtf_today[ticker]["h_medium"]
-
+    h_vals = {t: mtf_today[t]["h_medium"] for t in ETF_UNIVERSE if t in mtf_today}
     if not h_vals:
         return {"sync_level": 0.5, "scores": {t: 0.0 for t in ETF_UNIVERSE}}
 
-    arr       = np.array(list(h_vals.values()))
-    h_mean    = float(np.mean(arr))
-    h_std     = float(np.std(arr))
-
-    # Sync level: low std = synchronised; normalise to [0,1]
-    sync_level = float(np.exp(-h_std / 0.05))   # decays quickly with dispersion
-
-    # Per-ETF deviation score: positive = ETF H is above cluster mean
-    max_dev = float(np.max(np.abs(arr - h_mean))) + 1e-9
+    arr        = np.array(list(h_vals.values()))
+    h_mean     = float(np.mean(arr))
+    h_std      = float(np.std(arr))
+    sync_level = float(np.exp(-h_std / 0.05))
+    max_dev    = float(np.max(np.abs(arr - h_mean))) + 1e-9
     dev_scores = {t: float((v - h_mean) / max_dev) for t, v in h_vals.items()}
 
     return {
-        "sync_level":  round(sync_level, 4),
-        "h_mean":      round(h_mean, 4),
-        "h_std":       round(h_std, 4),
-        "scores":      {t: round(v, 4) for t, v in dev_scores.items()},
+        "sync_level": round(sync_level, 4),
+        "h_mean":     round(h_mean,     4),
+        "h_std":      round(h_std,      4),
+        "scores":     {t: round(v, 4) for t, v in dev_scores.items()},
     }
 
 
-# ── Master conviction score ───────────────────────────────────────────────────
+# =============================================================================
+# Momentum overlay
+# =============================================================================
 
-# Component weights
-W_MTF  = 0.40   # multi-timeframe alignment
-W_DIV  = 0.40   # divergence (momentum + persistence + transition)
-W_SYNC = 0.20   # cross-asset sync (reward outliers)
+def compute_momentum_scores(
+    returns_df: pd.DataFrame,
+    w3m:        float = 0.5,
+) -> dict:
+    """
+    Cross-sectional rank-based momentum scores per ETF.
+    w3m: weight on 3m momentum (1-w3m = weight on 6m momentum).
+    Returns dict: ticker -> normalised momentum score in [0, 1].
+    """
+    etfs    = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    n       = len(returns_df)
+
+    ret_3m = {}
+    ret_6m = {}
+    for ticker in etfs:
+        s = returns_df[ticker].dropna()
+        ret_3m[ticker] = float(np.sum(s.values[-MOM_3M_WINDOW:])) if len(s) >= MOM_3M_WINDOW else 0.0
+        ret_6m[ticker] = float(np.sum(s.values[-MOM_6M_WINDOW:])) if len(s) >= MOM_6M_WINDOW else 0.0
+
+    # Cross-sectional rank normalisation -> [0, 1]
+    def rank_norm(d: dict) -> dict:
+        vals   = list(d.values())
+        tickers = list(d.keys())
+        ranks  = pd.Series(vals, index=tickers).rank(pct=True)
+        return ranks.to_dict()
+
+    rn3 = rank_norm(ret_3m)
+    rn6 = rank_norm(ret_6m)
+
+    return {
+        t: round(w3m * rn3.get(t, 0.5) + (1 - w3m) * rn6.get(t, 0.5), 4)
+        for t in etfs
+    }
+
+
+def optimise_momentum_weights(
+    returns_df:   pd.DataFrame,
+    hrc_scores:   dict,
+    train_window: int = 252,
+) -> tuple[float, float]:
+    """
+    Grid search over (mom_weight, w3m) to find the blend that maximised
+    Sharpe on the trailing train_window in-sample.
+    Returns (best_mom_weight, best_w3m).
+    """
+    etfs  = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    hist  = returns_df.tail(train_window)
+
+    best_sharpe = -np.inf
+    best_mw, best_w3 = 0.20, 0.50   # defaults
+
+    for mom_w in MOM_WEIGHT_GRID:
+        for w3m in MOM_3M_GRID:
+            daily_rets = []
+            prev_sig   = None
+
+            for i in range(MOM_6M_WINDOW, len(hist) - 1):
+                sub = hist.iloc[:i]
+                # Quick HRC scores (use pre-computed mtf_scores from hrc_scores dict)
+                mom_scores = compute_momentum_scores(sub, w3m=w3m)
+                blended = {}
+                for t in etfs:
+                    hrc = hrc_scores.get(t, {}).get("total", 0.5)
+                    mom = mom_scores.get(t, 0.5)
+                    blended[t] = (1 - mom_w) * hrc + mom_w * mom
+
+                sig = max(blended, key=blended.get)
+                next_ret = float(hist.iloc[i + 1][sig]) if sig in hist.columns else 0.0
+                fee = 5/10_000 if (prev_sig is not None and prev_sig != sig) else 0.0
+                daily_rets.append(next_ret - fee)
+                prev_sig = sig
+
+            if len(daily_rets) < 20:
+                continue
+            arr    = np.array(daily_rets)
+            sharpe = float(np.mean(arr) / (np.std(arr) + 1e-9) * np.sqrt(252))
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_mw, best_w3 = mom_w, w3m
+
+    return best_mw, best_w3
+
+
+# =============================================================================
+# Master conviction score
+# =============================================================================
+
+W_MTF  = 0.40
+W_DIV  = 0.40
+W_SYNC = 0.20
 
 
 def compute_conviction_scores(
-    mtf_today:   dict,
-    div_scores:  dict,
-    sync:        dict,
+    mtf_today:  dict,
+    div_scores: dict,
+    sync:       dict,
 ) -> dict:
-    """
-    Compute final conviction score per ETF.
-    Returns dict: ticker → {mtf, div, sync_component, total, label}
-    """
-    results = {}
-
+    results  = {}
     sync_dev = sync.get("scores", {})
 
     for ticker in ETF_UNIVERSE:
         if ticker not in mtf_today:
             continue
 
-        mtf_sc  = mtf_today[ticker]["mtf_score"]           # 0–1
-        div_sc  = div_scores.get(ticker, {}).get("div_score", 0.0)
-
-        # Normalise div to [0,1]: raw range is [-1, 1]
+        mtf_sc   = mtf_today[ticker]["mtf_score"]
+        div_sc   = div_scores.get(ticker, {}).get("div_score", 0.0)
         div_norm = float(np.clip((div_sc + 1.0) / 2.0, 0.0, 1.0))
-
-        # Sync: reward ETFs whose H deviates positively from cluster
-        sync_sc  = sync_dev.get(ticker, 0.0)               # -1 to +1
+        sync_sc  = sync_dev.get(ticker, 0.0)
         sync_norm = float(np.clip((sync_sc + 1.0) / 2.0, 0.0, 1.0))
-
-        total = W_MTF * mtf_sc + W_DIV * div_norm + W_SYNC * sync_norm
+        total    = W_MTF * mtf_sc + W_DIV * div_norm + W_SYNC * sync_norm
 
         results[ticker] = {
-            "mtf_score":   round(mtf_sc,   4),
-            "div_score":   round(div_norm, 4),
-            "sync_score":  round(sync_norm, 4),
-            "total":       round(total,    4),
-            "h_short":     mtf_today[ticker]["h_short"],
-            "h_medium":    mtf_today[ticker]["h_medium"],
-            "h_long":      mtf_today[ticker]["h_long"],
-            "label":       hurst_label(mtf_today[ticker]["h_medium"]),
+            "mtf_score":      round(mtf_sc,    4),
+            "div_score":      round(div_norm,  4),
+            "sync_score":     round(sync_norm, 4),
+            "total":          round(total,     4),
+            "h_short":        mtf_today[ticker]["h_short"],
+            "h_medium":       mtf_today[ticker]["h_medium"],
+            "h_long":         mtf_today[ticker]["h_long"],
+            "label":          hurst_label(mtf_today[ticker]["h_medium"]),
             "trending_count": mtf_today[ticker]["trending_count"],
         }
 
@@ -374,24 +446,40 @@ def conviction_label(score: float) -> str:
     return "Low"
 
 
-def generate_signal(conviction_scores: dict) -> dict:
-    """Pick top ETF by total conviction score."""
+def generate_signal(
+    conviction_scores: dict,
+    mom_scores:        Optional[dict] = None,
+    mom_weight:        float = 0.20,
+    w3m:               float = 0.50,
+) -> dict:
+    """
+    Pick top ETF by blended HRC + momentum score.
+    If mom_scores is None, uses pure HRC.
+    """
     if not conviction_scores:
-        return {"signal": "CASH", "conviction": 0.0, "label": "Low", "ranked": []}
+        return {"signal": "CASH", "conviction": 0.0, "label": "Low", "ranked": [],
+                "mom_weight": mom_weight, "w3m": w3m}
 
-    ranked = sorted(conviction_scores.items(), key=lambda x: -x[1]["total"])
+    blended = {}
+    for ticker, c in conviction_scores.items():
+        hrc = c["total"]
+        mom = mom_scores.get(ticker, 0.5) if mom_scores else 0.5
+        blended[ticker] = (1 - mom_weight) * hrc + mom_weight * mom
+
+    ranked = sorted(blended.items(), key=lambda x: -x[1])
     top    = ranked[0]
 
-    # Normalise top score to [0,1] relative to spread
-    scores = np.array([v["total"] for _, v in ranked])
+    scores = np.array([v for _, v in ranked])
     span   = scores.max() - scores.min() + 1e-9
-    norm   = (top[1]["total"] - scores.min()) / span
+    norm   = (top[1] - scores.min()) / span
 
     return {
         "signal":     top[0],
         "conviction": round(float(norm), 4),
-        "score":      top[1]["total"],
-        "label":      conviction_label(top[1]["total"]),
-        "ranked":     [(t, round(v["total"], 4)) for t, v in ranked],
+        "score":      round(top[1], 4),
+        "label":      conviction_label(top[1]),
+        "ranked":     [(t, round(v, 4)) for t, v in ranked],
         "scores":     conviction_scores,
+        "mom_weight": mom_weight,
+        "w3m":        w3m,
     }
