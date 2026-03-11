@@ -323,6 +323,8 @@ def compute_momentum_scores(
     Returns dict: ticker -> normalised momentum score in [0, 1].
     """
     etfs    = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    if not etfs:
+        return {t: 0.5 for t in ETF_UNIVERSE}
     n       = len(returns_df)
 
     ret_3m = {}
@@ -359,6 +361,9 @@ def optimise_momentum_weights(
     Returns (best_mom_weight, best_w3m).
     """
     etfs  = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    if not etfs:
+        log.warning("optimise_momentum_weights: no ETF columns found, returning defaults")
+        return 0.20, 0.50
     hist  = returns_df.tail(train_window)
 
     best_sharpe = -np.inf
@@ -465,6 +470,9 @@ def generate_signal(
         hrc = c["total"]
         mom = mom_scores.get(ticker, 0.5) if mom_scores else 0.5
         blended[ticker] = (1 - mom_weight) * hrc + mom_weight * mom
+    if not blended:
+        return {"signal": "CASH", "conviction": 0.0, "label": "Low", "ranked": [],
+                "mom_weight": mom_weight, "w3m": w3m}
 
     ranked = sorted(blended.items(), key=lambda x: -x[1])
     top    = ranked[0]
