@@ -37,6 +37,7 @@ VELOCITY_WINDOW = 63    # lookback for H63 velocity computation
 
 # -- Regime thresholds --------------------------------------------------------
 H_TRENDING     = 0.55
+H_WEAK_TREND   = 0.50   # new zone: 0.50-0.55 = Weak Trend
 H_RANDOM       = 0.45
 H_STRONG_TREND = 0.65
 
@@ -131,14 +132,16 @@ def hurst_rs(series: np.ndarray) -> float:
 def hurst_label(h: float) -> str:
     if h >= H_STRONG_TREND: return "Strong Trend"
     elif h >= H_TRENDING:   return "Mild Trend"
+    elif h >= H_WEAK_TREND: return "Weak Trend"
     elif h >= H_RANDOM:     return "Random Walk"
     else:                   return "Mean-Reverting"
 
 
 def hurst_regime_colour(h: float) -> str:
-    if h >= H_TRENDING: return "#16a34a"
-    elif h >= H_RANDOM: return "#d97706"
-    else:               return "#dc2626"
+    if h >= H_TRENDING:    return "#16a34a"   # green
+    elif h >= H_WEAK_TREND: return "#84cc16"  # yellow-green — weak trend
+    elif h >= H_RANDOM:    return "#d97706"   # amber
+    else:                  return "#dc2626"   # red
 
 
 # =============================================================================
