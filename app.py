@@ -33,8 +33,9 @@ try:
         compute_sync_score, compute_conviction_scores,
         compute_momentum_scores, optimise_momentum_weights,
         generate_signal, hurst_label, hurst_regime_colour,
+        velocity_label, velocity_colour,
         conviction_label, W_MTF, W_DIV, W_SYNC,
-        SHORT_WINDOW, MEDIUM_WINDOW, LONG_WINDOW,
+        MEDIUM_WINDOW, LONG_WINDOW, VELOCITY_WINDOW,
         H_TRENDING, H_RANDOM,
     )
     from walkforward import compute_wf_metrics
@@ -164,7 +165,7 @@ with st.sidebar:
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("📐 P2-ETF-HURST")
 st.caption(
-    "Hurst Confluence · Multi-Timeframe (42d/63d/126d) · "
+    "Hurst Confluence · H63 Velocity · Medium (63d) · Long (126d) · "
     "Regime Divergence · Cross-Asset Synchronisation · "
     f"ETFs: {' · '.join(ETF_UNIVERSE)}"
 )
@@ -276,7 +277,7 @@ with tab_signal:
             "MTF (40%)":    c.get("mtf_score", 0),
             "Divergence (40%)": c.get("div_score", 0),
             "Sync (20%)":   c.get("sync_score", 0),
-            f"H ({SHORT_WINDOW}d)":  c.get("h_short", 0.5),
+            "H Velocity":   c.get("h_velocity", c.get("h_short", 0.0)),
             f"H ({MEDIUM_WINDOW}d)":  c.get("h_medium", 0.5),
             f"H ({LONG_WINDOW}d)": c.get("h_long", 0.5),
             "Trending TFs": c.get("trending_count", 0),
@@ -286,7 +287,7 @@ with tab_signal:
     rows_df = pd.DataFrame(rows).set_index("ETF")
     st.dataframe(
         rows_df.style.highlight_max(subset=["Total Score"], color="#d1fae5")
-                     .format("{:.3f}", subset=["Total Score","MTF (40%)","Divergence (40%)","Sync (20%)",f"H ({SHORT_WINDOW}d)",f"H ({MEDIUM_WINDOW}d)",f"H ({LONG_WINDOW}d)"]),
+                     .format("{:.3f}", subset=["Total Score","MTF (40%)","Divergence (40%)","Sync (20%)","H Velocity",f"H ({MEDIUM_WINDOW}d)",f"H ({LONG_WINDOW}d)"]),
         use_container_width=True,
     )
 
@@ -348,7 +349,7 @@ with tab_signal:
 with tab_mtf:
     st.subheader("📊 Multi-Timeframe Hurst Analysis")
     st.caption(
-        f"Three windows: **{SHORT_WINDOW}d** (~2m) · **{MEDIUM_WINDOW}d** (~1q) · "
+        f"H63 Velocity ({VELOCITY_WINDOW}d lookback) · **{MEDIUM_WINDOW}d** (~1q) · "
         f"**{LONG_WINDOW}d** (~6m) · Trending threshold H > {H_TRENDING}"
     )
 
@@ -356,7 +357,7 @@ with tab_mtf:
     st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
     st.caption("Colour intensity = H value · Green = trending · Amber = random walk · Red = mean-reverting")
 
-    windows     = [(f"H {SHORT_WINDOW}d", "h_short"), (f"H {MEDIUM_WINDOW}d", "h_medium"), (f"H {LONG_WINDOW}d", "h_long")]
+    windows     = [("H63 Velocity", "h_short"), (f"H {MEDIUM_WINDOW}d", "h_medium"), (f"H {LONG_WINDOW}d", "h_long")]
     tickers_ord = [t for t in ETF_UNIVERSE if t in conviction]
     z_vals, text_vals = [], []
     for ticker in tickers_ord:
@@ -389,7 +390,7 @@ with tab_mtf:
     ))
     fig_hm.update_layout(
         **CHART_LAYOUT, height=280,
-        title=f"Hurst Exponent Heatmap — {ohlcv.index[-1].date()} | {SHORT_WINDOW}d · {MEDIUM_WINDOW}d · {LONG_WINDOW}d",
+        title=f"Hurst Heatmap — {ohlcv.index[-1].date()} | Velocity · {MEDIUM_WINDOW}d · {LONG_WINDOW}d",
         xaxis=dict(side="top"),
         yaxis=dict(autorange="reversed"),
     )
@@ -469,7 +470,7 @@ with tab_mtf:
             **CHART_LAYOUT, height=350,
             yaxis_title="Hurst Exponent H",
             yaxis_range=[0.2, 0.95],
-            title=f"{selected_etf} — Hurst History ({SHORT_WINDOW}d · {MEDIUM_WINDOW}d · {LONG_WINDOW}d)",
+            title=f"{selected_etf} — Hurst History (Velocity · {MEDIUM_WINDOW}d · {LONG_WINDOW}d)",
         )
         st.plotly_chart(fig_etf, use_container_width=True, key="per_etf_chart")
 
@@ -650,7 +651,7 @@ The signal conviction score per ETF is a weighted combination of three component
 
 | Component | Weight | Logic |
 |-----------|--------|-------|
-| **Multi-Timeframe Alignment** | {W_MTF:.0%} | H computed at 42d, 63d, 126d. Score = 1.0 if all 3 trending, 0.75 if short+medium align, 0.5 if 2-of-3 |
+| **MTF + Velocity** | {W_MTF:.0%} | H63 velocity (acceleration) + H63 level + H126 confirmation. Velocity boosts score when regime is accelerating |
 | **Hurst Divergence** | {W_DIV:.0%} | Blend of: (a) H risen vs 6m ago, (b) H above own 2yr baseline, (c) recently crossed 1yr mean |
 | **Cross-Asset Sync** | {W_SYNC:.0%} | Reward ETFs whose H diverges positively from the cluster mean |
 
