@@ -1,276 +1,196 @@
 """
-train.py — P2-ETF-HAWKES
-==========================
-Daily training pipeline orchestrator.
-Called by GitHub Actions at market close (9pm EST) on weekdays.
+train.py — P2-ETF-HURST
+=========================
+Daily pipeline orchestrator.
 
 Steps:
-  1. Load / update OHLCV data from HuggingFace
-  2. Select best event definition (or load from metadata)
-  3. Fit Hawkes models (all ETFs, best kernel by AIC)
-  4. Compute rolling Hurst exponents
-  5. Generate Option A and Option B signals
-  6. Compute cross-ETF excitation matrix
-  7. Build intensity history
-  8. Save everything to HuggingFace
-
-Author: P2SAMAPA
+  1. Load / update OHLCV from HuggingFace
+  2. Compute multi-timeframe Hurst for all ETFs
+  3. Compute divergence scores
+  4. Compute cross-asset sync
+  5. Generate today's conviction scores + signal
+  6. Build MTF history (rolling)
+  7. Walk-forward backtest
+  8. Save all outputs to HuggingFace
 """
 
 import os
-import sys
-import json
 import logging
-import argparse
-import numpy as np
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
 
-from data_manager import (
-    load_ohlcv_from_hf, load_metadata_from_hf,
-    incremental_update, build_full_dataset,
-    get_returns, get_volume, save_to_hf,
-    ETF_UNIVERSE, BENCHMARKS, ALL_TICKERS,
-)
-from hawkes import (
-    fit_all_etfs, get_signal,
-    compute_cross_excitation_matrix, build_intensity_history,
-    EVENT_DEFINITIONS,
-)
-from hurst import compute_all_hurst
-from strategy import (
-    generate_signal_option_a, generate_signal_option_b,
-    next_trading_day, calculate_metrics, backtest,
-)
 
+def run_pipeline(skip_hf_write: bool = False) -> dict:
+    from data_manager import (
+        load_ohlcv_from_hf, load_metadata_from_hf,
+        incremental_update, build_full_dataset,
+        save_to_hf, get_returns, get_volume,
+        ETF_UNIVERSE, BENCHMARKS,
+    )
+    from hurst_core import (
+        compute_all_mtf, compute_divergence_scores,
+        compute_sync_score, compute_conviction_scores,
+        generate_signal, build_mtf_history,
+        conviction_label,
+    )
+    from walkforward import run_walkforward
 
-def run_pipeline(
-    force_refresh:     bool = False,
-    skip_hf_write:     bool = False,
-    reselect_event_def: bool = False,
-    start_year:        int  = 2008,
-) -> dict:
-    results = {}
+    results  = {}
 
-    log.info("=" * 60)
-    log.info("P2-ETF-HAWKES — Daily Training Pipeline")
-    log.info(f"Started : {datetime.utcnow().isoformat()}Z")
-    log.info("=" * 60)
-
-    # ── Step 1: Load / update OHLCV ──────────────────────────────────────────
+    # ── Step 1: Load OHLCV ────────────────────────────────────────────────────
     log.info("Step 1: Loading OHLCV data...")
-    metadata = load_metadata_from_hf()
+    metadata = load_metadata_from_hf() or {}
+    ohlcv    = load_ohlcv_from_hf()
 
-    if force_refresh:
-        log.info("  Force refresh — rebuilding from scratch")
-        ohlcv = build_full_dataset()
+    if ohlcv is not None:
+        log.info(f"  Existing data: {ohlcv.shape}, updating...")
+        ohlcv = incremental_update(ohlcv)
     else:
-        existing = load_ohlcv_from_hf()
-        if existing is not None:
-            ohlcv = incremental_update(existing)
-        else:
-            log.warning("  No existing data found — running full build")
-            ohlcv = build_full_dataset()
+        log.info("  No existing data — full reseed from 2008...")
+        ohlcv = build_full_dataset()
 
     log.info(f"  OHLCV: {ohlcv.shape}, "
              f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}")
 
-    # Filter to start_year
-    cutoff = pd.Timestamp(f"{start_year}-01-01")
-    ohlcv  = ohlcv[ohlcv.index >= cutoff]
-
-    returns_df = get_returns(ohlcv)
-    volume_df  = get_volume(ohlcv)
-
-    # Separate ETF vs benchmark returns
+    returns_df  = get_returns(ohlcv)
     etf_returns = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
-    bm_returns  = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
+    bm_returns  = returns_df[[t for t in BENCHMARKS   if t in returns_df.columns]]
 
     results["data_rows"]  = len(ohlcv)
     results["date_range"] = f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}"
 
-    # ── Step 2: Event definition ──────────────────────────────────────────────
-    log.info("Step 2: Event definition selection...")
-    # "combined" (strict AND) produces too few events for MLE to detect
-    # clustering — branching ratio collapses to 0. Use return_only which
-    # gives ~3x more events and allows the MLE to find genuine self-excitation.
-    event_def = "return_only"
-    log.info(f"  Using event definition: {event_def}")
+    # ── Step 2: Multi-timeframe Hurst ─────────────────────────────────────────
+    log.info("Step 2: Computing multi-timeframe Hurst...")
+    mtf_today = compute_all_mtf(etf_returns)
+    for ticker, mtf in mtf_today.items():
+        log.info(f"  {ticker}: H21={mtf['h_short']:.3f} H63={mtf['h_medium']:.3f} "
+                 f"H252={mtf['h_long']:.3f} trending={mtf['trending_count']}/3 "
+                 f"mtf_score={mtf['mtf_score']:.3f}")
 
-    results["event_def"] = event_def
+    # ── Step 3: Divergence scores ─────────────────────────────────────────────
+    log.info("Step 3: Computing divergence scores...")
+    log.info("  Building MTF history for divergence baseline (step=5)...")
+    mtf_history = build_mtf_history(etf_returns, step=5)
+    log.info(f"  MTF history: {mtf_history.shape}")
+    div_scores  = compute_divergence_scores(mtf_today, mtf_history)
+    for ticker, d in div_scores.items():
+        log.info(f"  {ticker}: div_a={d['div_a']:.3f} div_b={d['div_b']:.3f} "
+                 f"div_c={d['div_c']:.3f} total={d['div_score']:.3f} "
+                 f"crossed={d.get('crossed', False)}")
 
-    # ── Step 3: Fit Hawkes models ─────────────────────────────────────────────
-    log.info("Step 3: Fitting Hawkes models...")
-    fit_results = fit_all_etfs(etf_returns, volume_df, event_def=event_def)
+    # ── Step 4: Cross-asset sync ──────────────────────────────────────────────
+    log.info("Step 4: Computing cross-asset synchronisation...")
+    sync = compute_sync_score(mtf_today)
+    log.info(f"  Sync level={sync['sync_level']:.3f} "
+             f"H_mean={sync['h_mean']:.3f} H_std={sync['h_std']:.3f}")
 
-    for ticker, res in fit_results.items():
-        p = res["params"]
-        log.info(f"  {ticker}: kernel={p.kernel} μ={p.mu:.4f} "
-                 f"branching={p.branching:.3f} AIC={p.aic:.2f} "
-                 f"events={p.n_events}")
+    # ── Step 5: Conviction scores + signal ───────────────────────────────────
+    log.info("Step 5: Generating conviction scores and signal...")
+    conviction = compute_conviction_scores(mtf_today, div_scores, sync)
+    signal     = generate_signal(conviction)
 
-    # ── Step 4: Hurst exponents ───────────────────────────────────────────────
-    log.info("Step 4: Computing rolling Hurst exponents...")
-    hurst_df = compute_all_hurst(etf_returns, window=252)
-    log.info(f"  Hurst computed for {len(hurst_df.columns)} ETFs")
+    log.info(f"  Signal: {signal['signal']} "
+             f"conviction={signal['conviction']:.3f} "
+             f"label={signal['label']}")
+    log.info("  Rankings:")
+    for etf, score in signal["ranked"]:
+        log.info(f"    {etf}: {score:.4f}")
 
-    # ── Step 5: Generate signals ──────────────────────────────────────────────
-    log.info("Step 5: Generating signals...")
-    sig_a = generate_signal_option_a(fit_results, etf_returns, event_def)
-    sig_b = generate_signal_option_b(fit_results, etf_returns, hurst_df, event_def)
+    results["signal"]     = signal["signal"]
+    results["conviction"] = signal["conviction"]
 
-    next_date = next_trading_day(ohlcv.index[-1])
+    # ── Step 6: Build signals DataFrame ──────────────────────────────────────
+    log.info("Step 6: Building signals DataFrame...")
+    today = pd.Timestamp(datetime.utcnow().date())
+    signal_row = {
+        "signal":     signal["signal"],
+        "conviction": signal["conviction"],
+        "label":      signal["label"],
+    }
+    for ticker, c in conviction.items():
+        signal_row[f"{ticker}_total"]   = c["total"]
+        signal_row[f"{ticker}_mtf"]     = c["mtf_score"]
+        signal_row[f"{ticker}_div"]     = c["div_score"]
+        signal_row[f"{ticker}_sync"]    = c["sync_score"]
+        signal_row[f"{ticker}_h_short"] = c["h_short"]
+        signal_row[f"{ticker}_h_med"]   = c["h_medium"]
+        signal_row[f"{ticker}_h_long"]  = c["h_long"]
 
-    log.info(f"  Option A: {sig_a['signal']} (conviction={sig_a['conviction']:.3f} {sig_a['label']})")
-    log.info(f"  Option B: {sig_b['signal']} (conviction={sig_b['conviction']:.3f} {sig_b['label']})")
-    log.info(f"  Next trading day: {next_date.date()}")
+    signal_row_df = pd.DataFrame([signal_row], index=[today])
 
-    results.update({
-        "signal_a":       sig_a["signal"],
-        "conviction_a":   sig_a["conviction"],
-        "label_a":        sig_a["label"],
-        "signal_b":       sig_b["signal"],
-        "conviction_b":   sig_b["conviction"],
-        "label_b":        sig_b["label"],
-        "next_date":      str(next_date.date()),
-    })
-
-    # ── Step 6: Cross-ETF excitation matrix ───────────────────────────────────
-    log.info("Step 6: Computing cross-ETF excitation matrix...")
-    cross_matrix = compute_cross_excitation_matrix(etf_returns, volume_df, event_def)
-    log.info(f"  Cross-excitation matrix:\n{cross_matrix.round(3).to_string()}")
-
-    # ── Step 7: Build intensity history ───────────────────────────────────────
-    log.info("Step 7: Building intensity history...")
-    intensity_df = build_intensity_history(fit_results, etf_returns.index)
-    log.info(f"  Intensity history: {intensity_df.shape}")
-
-    # ── Step 8: Walk-forward backtest ─────────────────────────────────────────
-    log.info("Step 8: Running walk-forward backtest...")
+    # Append to existing signals history
+    existing_signals = None
     try:
-        from walkforward import run_walkforward
+        from data_manager import load_signals_from_hf
+        existing_signals = load_signals_from_hf()
+    except Exception:
+        pass
+
+    if existing_signals is not None and not existing_signals.empty:
+        signals_df = pd.concat([existing_signals, signal_row_df])
+        signals_df = signals_df[~signals_df.index.duplicated(keep="last")].sort_index()
+    else:
+        signals_df = signal_row_df
+
+    # ── Step 7: Walk-forward backtest ─────────────────────────────────────────
+    log.info("Step 7: Running walk-forward backtest...")
+    try:
         wf_df = run_walkforward(
             returns_df   = etf_returns,
-            volume_df    = volume_df,
             bm_returns   = bm_returns,
-            event_def    = event_def,
             train_window = 252,
             step_size    = 21,
         )
-        log.info(f"  Walk-forward: {len(wf_df)} OOS days "
-                 f"cum_A={wf_df['cum_A'].iloc[-1]:.3f} "
-                 f"cum_B={wf_df['cum_B'].iloc[-1]:.3f}")
+        log.info(f"  Walk-forward: {len(wf_df)} OOS days, "
+                 f"cum={wf_df['cum_strategy'].iloc[-1]:.3f}")
     except Exception as e:
-        log.error(f"Walk-forward failed: {e}")
+        log.error(f"  Walk-forward failed: {e}")
         wf_df = None
 
-    # ── Step 9: Build signals DataFrame ──────────────────────────────────────
-    log.info("Step 9: Building signals DataFrame...")
+    # ── Step 8: Save to HuggingFace ───────────────────────────────────────────
+    metadata.update({
+        "last_data_update": str(ohlcv.index[-1].date()),
+        "last_model_fit":   str(datetime.utcnow().date()),
+        "signal":           signal["signal"],
+        "conviction":       signal["conviction"],
+        "dataset_version":  metadata.get("dataset_version", 0) + 1,
+    })
 
-    # Build per-day signal history using rolling window approach
-    # (simplified: just store today's signal for audit trail)
-    signal_row = {
-        "signal_A":      sig_a["signal"],
-        "conviction_A":  sig_a["conviction"],
-        "label_A":       sig_a["label"],
-        "top_ratio_A":   sig_a["top_ratio"],
-        "signal_B":      sig_b["signal"],
-        "conviction_B":  sig_b["conviction"],
-        "label_B":       sig_b["label"],
-        "event_def":     event_def,
+    save_files = {
+        "ohlcv_data.parquet":      ohlcv,
+        "mtf_history.parquet":     mtf_history,
+        "signals_latest.parquet":  signals_df,
+        "metadata.json":           metadata,
     }
-    # Add per-ETF excitation ratios
-    for t, v in sig_a["excitation"].items():
-        signal_row[f"{t}_excitation"] = v
-    # Add per-ETF Hurst
-    for t in ETF_UNIVERSE:
-        if t in hurst_df.columns:
-            h_series = hurst_df[t].dropna()
-            signal_row[f"{t}_hurst"] = round(float(h_series.iloc[-1]), 4) if len(h_series) > 0 else 0.5
+    if wf_df is not None:
+        save_files["walkforward_returns.parquet"] = wf_df
 
-    signals_df = pd.DataFrame([signal_row], index=[next_date])
-
-    # ── Hawkes params dict ────────────────────────────────────────────────────
-    params_dict = {
-        t: res["params"].to_dict()
-        for t, res in fit_results.items()
-    }
-    params_dict["best_event_def"] = event_def
-    params_dict["fit_date"]       = str(datetime.utcnow().date())
-
-    # ── Step 9: Save to HuggingFace ───────────────────────────────────────────
     if not skip_hf_write:
-        log.info("Step 10: Saving to HuggingFace...")
-
-        # Update metadata
-        metadata.update({
-            "last_data_update":  str(ohlcv.index[-1].date()),
-            "last_model_fit":    str(datetime.utcnow().date()),
-            "best_event_def":    event_def,
-            "signal_a":          sig_a["signal"],
-            "signal_b":          sig_b["signal"],
-            "next_date":         str(next_date.date()),
-            "dataset_version":   metadata.get("dataset_version", 1) + 1,
-        })
-
-        save_files = {
-            "ohlcv_data.parquet":        ohlcv,
-            "signals_latest.parquet":    signals_df,
-            "intensity_history.parquet": intensity_df,
-            "hurst_history.parquet":     hurst_df,
-            "cross_excitation.parquet":  cross_matrix,
-            "hawkes_params.json":        params_dict,
-            "metadata.json":             metadata,
-        }
-        if wf_df is not None:
-            save_files["walkforward_returns.parquet"] = wf_df
-
+        log.info("Step 8: Saving to HuggingFace...")
         ok = save_to_hf(
             files=save_files,
             commit_message=(
                 f"Daily update {datetime.utcnow().date()} — "
-                f"A:{sig_a['signal']} B:{sig_b['signal']}"
+                f"Signal: {signal['signal']} ({signal['label']})"
             ),
         )
         results["hf_saved"] = ok
-        log.info(f"  HuggingFace save: {'✅ OK' if ok else '❌ FAILED'}")
-    else:
-        log.info("Step 9: Skipping HF write (--local flag)")
-        results["hf_saved"] = False
+        log.info(f"  HF save: {'✅ OK' if ok else '❌ FAILED'}")
 
-    log.info("=" * 60)
     log.info("Pipeline complete.")
-    log.info(f"  Option A signal : {sig_a['signal']} ({sig_a['label']})")
-    log.info(f"  Option B signal : {sig_b['signal']} ({sig_b['label']})")
-    log.info(f"  Next trade date : {next_date.date()}")
-    log.info(f"  Event def used  : {event_def}")
-    log.info("=" * 60)
-
     return results
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="P2-ETF-HAWKES Training Pipeline")
-    parser.add_argument("--force-refresh",      action="store_true",
-                        help="Rebuild full OHLCV dataset from scratch")
-    parser.add_argument("--local",              action="store_true",
-                        help="Skip HuggingFace write (local testing)")
-    parser.add_argument("--reselect-event-def", action="store_true",
-                        help="Re-run event definition selection (takes ~10 min)")
-    parser.add_argument("--start-year",         type=int, default=2008)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--skip-hf", action="store_true")
     args = parser.parse_args()
-
-    results = run_pipeline(
-        force_refresh      = args.force_refresh,
-        skip_hf_write      = args.local,
-        reselect_event_def = args.reselect_event_def,
-        start_year         = args.start_year,
-    )
-    sys.exit(0)
+    run_pipeline(skip_hf_write=args.skip_hf)
