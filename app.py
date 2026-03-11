@@ -276,9 +276,9 @@ with tab_signal:
             "MTF (40%)":    c.get("mtf_score", 0),
             "Divergence (40%)": c.get("div_score", 0),
             "Sync (20%)":   c.get("sync_score", 0),
-            "H (21d)":      c.get("h_short", 0.5),
-            "H (63d)":      c.get("h_medium", 0.5),
-            "H (252d)":     c.get("h_long", 0.5),
+            f"H ({SHORT_WINDOW}d)":  c.get("h_short", 0.5),
+            f"H ({MEDIUM_WINDOW}d)":  c.get("h_medium", 0.5),
+            f"H ({LONG_WINDOW}d)": c.get("h_long", 0.5),
             "Trending TFs": c.get("trending_count", 0),
             "Regime":       c.get("label", "—"),
             "Crossed ↑":    "✅" if d.get("crossed") else "—",
@@ -286,7 +286,7 @@ with tab_signal:
     rows_df = pd.DataFrame(rows).set_index("ETF")
     st.dataframe(
         rows_df.style.highlight_max(subset=["Total Score"], color="#d1fae5")
-                     .format("{:.3f}", subset=["Total Score","MTF (40%)","Divergence (40%)","Sync (20%)","H (21d)","H (63d)","H (252d)"]),
+                     .format("{:.3f}", subset=["Total Score","MTF (40%)","Divergence (40%)","Sync (20%)",f"H ({SHORT_WINDOW}d)",f"H ({MEDIUM_WINDOW}d)",f"H ({LONG_WINDOW}d)"]),
         use_container_width=True,
     )
 
@@ -356,7 +356,7 @@ with tab_mtf:
     st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
     st.caption("Colour intensity = H value · Green = trending · Amber = random walk · Red = mean-reverting")
 
-    windows     = [("H 21d", "h_short"), ("H 63d", "h_medium"), ("H 252d", "h_long")]
+    windows     = [(f"H {SHORT_WINDOW}d", "h_short"), (f"H {MEDIUM_WINDOW}d", "h_medium"), (f"H {LONG_WINDOW}d", "h_long")]
     tickers_ord = [t for t in ETF_UNIVERSE if t in conviction]
     z_vals, text_vals = [], []
     for ticker in tickers_ord:
@@ -389,7 +389,7 @@ with tab_mtf:
     ))
     fig_hm.update_layout(
         **CHART_LAYOUT, height=280,
-        title=f"Hurst Exponent Heatmap — {ohlcv.index[-1].date()}",
+        title=f"Hurst Exponent Heatmap — {ohlcv.index[-1].date()} | {SHORT_WINDOW}d · {MEDIUM_WINDOW}d · {LONG_WINDOW}d",
         xaxis=dict(side="top"),
         yaxis=dict(autorange="reversed"),
     )
@@ -469,7 +469,7 @@ with tab_mtf:
             **CHART_LAYOUT, height=350,
             yaxis_title="Hurst Exponent H",
             yaxis_range=[0.2, 0.95],
-            title=f"{selected_etf} — Hurst History (21d · 63d · 252d)",
+            title=f"{selected_etf} — Hurst History ({SHORT_WINDOW}d · {MEDIUM_WINDOW}d · {LONG_WINDOW}d)",
         )
         st.plotly_chart(fig_etf, use_container_width=True, key="per_etf_chart")
 
