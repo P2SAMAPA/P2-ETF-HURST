@@ -63,36 +63,48 @@ def load_metadata_from_hf()    -> dict | None:         return _load_json("metada
 def get_returns(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """Extract close prices and compute log returns.
     Handles multiple column naming conventions:
-      - TICKER_close  (yfinance standard)
+      - (TICKER, 'Close') MultiIndex tuples  ← old Hawkes HF data
+      - TICKER_close  (yfinance flat)
       - close_TICKER
       - TICKER        (close only, flat)
     """
     cols = ohlcv.columns.tolist()
 
-    # Try TICKER_close format
+    # MultiIndex tuples: (TICKER, 'Close')
+    if isinstance(cols[0], tuple):
+        close_cols = [c for c in cols if c[1].lower() == 'close']
+        close = ohlcv[close_cols].copy()
+        close.columns = [c[0] for c in close_cols]
+        return np.log(close / close.shift(1))
+
+    # TICKER_close format
     close_cols = [c for c in cols if c.endswith("_close")]
-
-    # Try close_TICKER format
-    if not close_cols:
-        close_cols = [c for c in cols if c.startswith("close_")]
-
-    # Try TICKER format — assume all columns are close prices
-    if not close_cols:
-        close_cols = cols
-
-    close = ohlcv[close_cols].copy()
-
-    # Normalise column names to just ticker
-    if close_cols[0].endswith("_close"):
+    if close_cols:
+        close = ohlcv[close_cols].copy()
         close.columns = [c.replace("_close", "") for c in close_cols]
-    elif close_cols[0].startswith("close_"):
-        close.columns = [c.replace("close_", "") for c in close_cols]
+        return np.log(close / close.shift(1))
 
-    return np.log(close / close.shift(1))
+    # close_TICKER format
+    close_cols = [c for c in cols if c.startswith("close_")]
+    if close_cols:
+        close = ohlcv[close_cols].copy()
+        close.columns = [c.replace("close_", "") for c in close_cols]
+        return np.log(close / close.shift(1))
+
+    # Fallback — assume all columns are close prices
+    return np.log(ohlcv / ohlcv.shift(1))
 
 
 def get_volume(ohlcv: pd.DataFrame) -> pd.DataFrame:
-    vol_cols = [c for c in ohlcv.columns if c.endswith("_volume")]
+    cols = ohlcv.columns.tolist()
+    if isinstance(cols[0], tuple):
+        vol_cols = [c for c in cols if c[1].lower() == 'volume']
+        if not vol_cols:
+            return pd.DataFrame()
+        vol = ohlcv[vol_cols].copy()
+        vol.columns = [c[0] for c in vol_cols]
+        return vol
+    vol_cols = [c for c in cols if c.endswith("_volume")]
     if not vol_cols:
         return pd.DataFrame()
     vol = ohlcv[vol_cols].copy()
