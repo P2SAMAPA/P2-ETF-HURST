@@ -53,7 +53,7 @@ def run_walkforward(
 
     records   = []
     prev_sig  = None
-    # Cache optimised weights — re-optimise every 63 days (quarterly)
+    # Re-optimise every fold — diagnostic mode to check recency overfitting
     cached_mom_w = 0.20
     cached_w3m   = 0.50
     last_opt_fold = -999
@@ -77,7 +77,7 @@ def run_walkforward(
             conviction = compute_conviction_scores(mtf_today, div_scores, sync)
 
             # -- Optimise momentum weights (quarterly re-optimisation) --
-            if (fold_i - last_opt_fold) >= 3:
+            if (fold_i - last_opt_fold) >= 1:  # every fold — diagnostic
                 cached_mom_w, cached_w3m = optimise_momentum_weights(
                     train_ret, conviction, train_window=train_window
                 )
