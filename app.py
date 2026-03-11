@@ -164,7 +164,7 @@ with st.sidebar:
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("📐 P2-ETF-HURST")
 st.caption(
-    "Hurst Confluence · Multi-Timeframe (21d/63d/252d) · "
+    "Hurst Confluence · Multi-Timeframe (42d/63d/126d) · "
     "Regime Divergence · Cross-Asset Synchronisation · "
     f"ETFs: {' · '.join(ETF_UNIVERSE)}"
 )
@@ -348,8 +348,8 @@ with tab_signal:
 with tab_mtf:
     st.subheader("📊 Multi-Timeframe Hurst Analysis")
     st.caption(
-        f"Three windows: **{SHORT_WINDOW}d** (short) · **{MEDIUM_WINDOW}d** (medium) · "
-        f"**{LONG_WINDOW}d** (long) · Trending threshold H > {H_TRENDING}"
+        f"Three windows: **{SHORT_WINDOW}d** (~2m) · **{MEDIUM_WINDOW}d** (~1q) · "
+        f"**{LONG_WINDOW}d** (~6m) · Trending threshold H > {H_TRENDING}"
     )
 
     # ── Heatmap: ETF × Timeframe ──────────────────────────────────────────────
@@ -650,7 +650,7 @@ The signal conviction score per ETF is a weighted combination of three component
 
 | Component | Weight | Logic |
 |-----------|--------|-------|
-| **Multi-Timeframe Alignment** | {W_MTF:.0%} | H computed at 21d, 63d, 252d. Score = 1.0 if all 3 trending, 0.75 if short+medium align, 0.5 if 2-of-3 |
+| **Multi-Timeframe Alignment** | {W_MTF:.0%} | H computed at 42d, 63d, 126d. Score = 1.0 if all 3 trending, 0.75 if short+medium align, 0.5 if 2-of-3 |
 | **Hurst Divergence** | {W_DIV:.0%} | Blend of: (a) H risen vs 6m ago, (b) H above own 2yr baseline, (c) recently crossed 1yr mean |
 | **Cross-Asset Sync** | {W_SYNC:.0%} | Reward ETFs whose H diverges positively from the cluster mean |
 
