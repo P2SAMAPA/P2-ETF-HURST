@@ -61,11 +61,33 @@ def load_metadata_from_hf()    -> dict | None:         return _load_json("metada
 
 
 def get_returns(ohlcv: pd.DataFrame) -> pd.DataFrame:
-    close_cols = [c for c in ohlcv.columns if c.endswith("_close")]
+    """Extract close prices and compute log returns.
+    Handles multiple column naming conventions:
+      - TICKER_close  (yfinance standard)
+      - close_TICKER
+      - TICKER        (close only, flat)
+    """
+    cols = ohlcv.columns.tolist()
+
+    # Try TICKER_close format
+    close_cols = [c for c in cols if c.endswith("_close")]
+
+    # Try close_TICKER format
     if not close_cols:
-        close_cols = ohlcv.columns.tolist()
+        close_cols = [c for c in cols if c.startswith("close_")]
+
+    # Try TICKER format — assume all columns are close prices
+    if not close_cols:
+        close_cols = cols
+
     close = ohlcv[close_cols].copy()
-    close.columns = [c.replace("_close", "") for c in close_cols]
+
+    # Normalise column names to just ticker
+    if close_cols[0].endswith("_close"):
+        close.columns = [c.replace("_close", "") for c in close_cols]
+    elif close_cols[0].startswith("close_"):
+        close.columns = [c.replace("close_", "") for c in close_cols]
+
     return np.log(close / close.shift(1))
 
 
