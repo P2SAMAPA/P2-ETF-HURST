@@ -1,40 +1,36 @@
-# daily.yml — P2-ETF-HAWKES
-# Daily training pipeline: fetch OHLCV, fit Hawkes, generate signals, push to HF
-# Runs at 9pm EST (02:00 UTC) on weekdays — after market close
-# Can also be triggered manually from Streamlit app or GitHub Actions UI
-
-name: Daily Training Pipeline
+name: Daily HRC Pipeline
 
 on:
   schedule:
-    - cron: "0 2 * * 2-6"    # 02:00 UTC = 9pm EST Mon-Fri
-  workflow_dispatch:          # manual trigger from app or GitHub UI
+    - cron: "0 2 * * 2-6"   # 02:00 UTC = 9pm EST Mon-Fri (after market close)
+  workflow_dispatch:
 
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-
-    env:
-      HF_TOKEN:     ${{ secrets.HF_TOKEN }}
-      GH_PAT:       ${{ secrets.GH_PAT }}
-      GITHUB_REPO:  ${{ secrets.GITHUB_REPO }}
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run daily training pipeline
+      - name: Run HRC pipeline
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python train.py
 
-      - name: Log completion
-        run: echo "✅ P2-ETF-HAWKES pipeline complete $(date -u)"
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
