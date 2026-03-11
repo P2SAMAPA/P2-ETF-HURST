@@ -61,12 +61,14 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
              f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}")
 
     returns_df  = get_returns(ohlcv)
-    log.info(f"  Returns columns: {returns_df.columns.tolist()}")
+    log.info(f"  Returns columns ({len(returns_df.columns)}): {returns_df.columns.tolist()[:8]}...")
     etf_returns = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
     bm_returns  = returns_df[[t for t in BENCHMARKS   if t in returns_df.columns]]
     log.info(f"  ETF returns: {etf_returns.shape}, cols: {etf_returns.columns.tolist()}")
     if len(etf_returns.columns) == 0:
         raise RuntimeError(f"No ETF columns found. Available: {returns_df.columns.tolist()[:10]}")
+
+
 
     results["data_rows"]  = len(ohlcv)
     results["date_range"] = f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}"
