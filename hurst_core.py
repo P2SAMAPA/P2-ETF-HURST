@@ -30,9 +30,10 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 # -- Timeframe windows --------------------------------------------------------
-SHORT_WINDOW  = 42    # ~2 months — minimum viable DFA window
-MEDIUM_WINDOW = 63    # ~1 quarter — core signal window
-LONG_WINDOW   = 126   # ~6 months — medium-term regime
+# SHORT_WINDOW removed — replaced by H_VELOCITY (rate of change of H63)
+MEDIUM_WINDOW   = 63    # ~1 quarter — core signal window
+LONG_WINDOW     = 126   # ~6 months — medium-term regime
+VELOCITY_WINDOW = 63    # lookback for H63 velocity computation
 
 # -- Regime thresholds --------------------------------------------------------
 H_TRENDING     = 0.55
@@ -144,38 +145,88 @@ def hurst_regime_colour(h: float) -> str:
 # Multi-timeframe Hurst
 # =============================================================================
 
-def compute_mtf_hurst(returns: pd.Series, date: Optional[pd.Timestamp] = None) -> dict:
-    """Compute DFA Hurst at SHORT/MEDIUM/LONG windows for a single ETF."""
+def compute_hurst_velocity(returns: pd.Series) -> float:
+    """
+    Compute H63 velocity — rate of change of the 63d Hurst exponent
+    over the past VELOCITY_WINDOW days.
+
+    Methodology:
+      - Compute H63 at current point
+      - Compute H63 at VELOCITY_WINDOW days ago
+      - Velocity = (H_now - H_past) / H_past  (normalised rate of change)
+      - Clipped to [-1, 1] and normalised to [0, 1] for scoring
+
+    Positive velocity = regime accelerating into trend (buy signal)
+    Negative velocity = regime decelerating (caution)
+    """
     s = returns.dropna()
     n = len(s)
 
-    h_short  = hurst_dfa(s.values[-SHORT_WINDOW:])  if n >= SHORT_WINDOW  else 0.5
-    h_medium = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if n >= MEDIUM_WINDOW else 0.5
-    h_long   = hurst_dfa(s.values[-LONG_WINDOW:])   if n >= LONG_WINDOW   else 0.5
+    min_needed = MEDIUM_WINDOW + VELOCITY_WINDOW
+    if n < min_needed:
+        return 0.0   # no velocity — insufficient history
 
-    trending = sum([h_short  >= H_TRENDING,
-                    h_medium >= H_TRENDING,
-                    h_long   >= H_TRENDING])
+    h_now  = hurst_dfa(s.values[-MEDIUM_WINDOW:])
+    h_past = hurst_dfa(s.values[-(MEDIUM_WINDOW + VELOCITY_WINDOW):-VELOCITY_WINDOW])
 
-    short_med_align = (h_short >= H_TRENDING and h_medium >= H_TRENDING)
-    long_confirms   = (h_long  >= H_TRENDING)
+    if h_past < 1e-6:
+        return 0.0
 
-    mtf_score = (
-        1.0  if (short_med_align and long_confirms) else
-        0.75 if short_med_align else
-        0.5  if (trending >= 2)  else
-        0.25 if (trending == 1)  else
-        0.0
-    )
+    velocity = float(np.clip((h_now - h_past) / max(h_past, 0.1), -1.0, 1.0))
+    return velocity
+
+
+def velocity_label(v: float) -> str:
+    if v >= 0.15:  return "Accelerating ↑"
+    elif v >= 0.0: return "Stable →"
+    elif v >= -0.15: return "Decelerating ↓"
+    else:          return "Reversing ↓↓"
+
+
+def velocity_colour(v: float) -> str:
+    if v >= 0.15:    return "#16a34a"   # green
+    elif v >= 0.0:   return "#65a30d"   # light green
+    elif v >= -0.15: return "#d97706"   # amber
+    else:            return "#dc2626"   # red
+
+
+def compute_mtf_hurst(returns: pd.Series, date: Optional[pd.Timestamp] = None) -> dict:
+    """
+    Compute DFA Hurst at MEDIUM (63d) and LONG (126d) windows,
+    plus H63 velocity (replaces unreliable SHORT/42d window).
+    """
+    s = returns.dropna()
+    n = len(s)
+
+    h_medium  = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if n >= MEDIUM_WINDOW else 0.5
+    h_long    = hurst_dfa(s.values[-LONG_WINDOW:])   if n >= LONG_WINDOW   else 0.5
+    h_velocity = compute_hurst_velocity(s)
+
+    # MTF score: based on medium + long, velocity as tiebreaker/boost
+    med_trending  = h_medium >= H_TRENDING
+    long_trending = h_long   >= H_TRENDING
+    vel_positive  = h_velocity >= 0.0
+
+    if med_trending and long_trending:
+        mtf_score = 1.0 if vel_positive else 0.85
+    elif med_trending:
+        mtf_score = 0.75 if vel_positive else 0.55
+    elif long_trending:
+        mtf_score = 0.50 if vel_positive else 0.30
+    else:
+        mtf_score = 0.15 if vel_positive else 0.0
+
+    trending = sum([med_trending, long_trending])
 
     return {
-        "h_short":        h_short,
+        "h_short":        h_velocity,    # repurposed slot: velocity in [-1,1]
         "h_medium":       h_medium,
         "h_long":         h_long,
+        "h_velocity":     h_velocity,
         "mtf_score":      mtf_score,
-        "mtf_strong":     short_med_align or (trending >= 2),
+        "mtf_strong":     med_trending,
         "trending_count": trending,
-        "label_short":    hurst_label(h_short),
+        "label_short":    velocity_label(h_velocity),   # velocity label
         "label_medium":   hurst_label(h_medium),
         "label_long":     hurst_label(h_long),
     }
@@ -208,9 +259,10 @@ def build_mtf_history(returns_df: pd.DataFrame, step: int = 5) -> pd.DataFrame:
             if ticker not in slice_.columns:
                 continue
             s = slice_[ticker].dropna()
-            row[f"{ticker}_h_short"]  = hurst_dfa(s.values[-SHORT_WINDOW:])  if len(s) >= SHORT_WINDOW  else np.nan
-            row[f"{ticker}_h_medium"] = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if len(s) >= MEDIUM_WINDOW else np.nan
-            row[f"{ticker}_h_long"]   = hurst_dfa(s.values[-LONG_WINDOW:])   if len(s) >= LONG_WINDOW   else np.nan
+            row[f"{ticker}_h_velocity"] = compute_hurst_velocity(s)
+            row[f"{ticker}_h_short"]    = row[f"{ticker}_h_velocity"]  # alias for compat
+            row[f"{ticker}_h_medium"]   = hurst_dfa(s.values[-MEDIUM_WINDOW:]) if len(s) >= MEDIUM_WINDOW else np.nan
+            row[f"{ticker}_h_long"]     = hurst_dfa(s.values[-LONG_WINDOW:])   if len(s) >= LONG_WINDOW   else np.nan
         records.append(row)
 
     if not records:
