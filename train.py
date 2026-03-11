@@ -37,6 +37,7 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
     from hurst_core import (
         compute_all_mtf, compute_divergence_scores,
         compute_sync_score, compute_conviction_scores,
+        compute_momentum_scores, optimise_momentum_weights,
         generate_signal, build_mtf_history,
         conviction_label,
     )
@@ -94,11 +95,21 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
     # ── Step 5: Conviction scores + signal ───────────────────────────────────
     log.info("Step 5: Generating conviction scores and signal...")
     conviction = compute_conviction_scores(mtf_today, div_scores, sync)
-    signal     = generate_signal(conviction)
+
+    # Optimise momentum blend weights on last 252 days
+    log.info("  Optimising momentum weights...")
+    mom_w, w3m = optimise_momentum_weights(etf_returns, conviction, train_window=252)
+    log.info(f"  Optimised: mom_weight={mom_w:.2f} w3m={w3m:.2f}")
+
+    mom_scores = compute_momentum_scores(etf_returns, w3m=w3m)
+    log.info(f"  Momentum scores: { {t: round(v,3) for t,v in mom_scores.items()} }")
+
+    signal = generate_signal(conviction, mom_scores, mom_weight=mom_w, w3m=w3m)
 
     log.info(f"  Signal: {signal['signal']} "
              f"conviction={signal['conviction']:.3f} "
-             f"label={signal['label']}")
+             f"label={signal['label']} "
+             f"mom_w={mom_w:.2f} w3m={w3m:.2f}")
     log.info("  Rankings:")
     for etf, score in signal["ranked"]:
         log.info(f"    {etf}: {score:.4f}")
