@@ -349,83 +349,129 @@ with tab_mtf:
         f"**{LONG_WINDOW}d** (long) · Trending threshold H > {H_TRENDING}"
     )
 
-    # ── Current MTF heatmap ───────────────────────────────────────────────────
-    st.markdown("#### Current Hurst Values by Timeframe")
-    windows = [("21d", "h_short"), ("63d", "h_medium"), ("252d", "h_long")]
-    header_cols = st.columns([1] + [1]*len(windows))
-    header_cols[0].markdown("**ETF**")
-    for label, _ in windows:
-        header_cols[windows.index((label, _)) + 1].markdown(f"**H {label}**")
+    # ── Heatmap: ETF × Timeframe ──────────────────────────────────────────────
+    st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
+    st.caption("Colour intensity = H value · Green = trending · Amber = random walk · Red = mean-reverting")
 
-    for ticker in ETF_UNIVERSE:
-        if ticker not in conviction:
-            continue
-        c    = conviction[ticker]
-        row  = st.columns([1] + [1]*len(windows))
-        row[0].markdown(f"**{ticker}**")
-        for i, (label, key) in enumerate(windows):
-            h   = c.get(key, 0.5)
-            col = hurst_regime_colour(h)
-            row[i+1].markdown(
-                f"<span style='color:{col};font-weight:600'>{h:.3f}</span> "
-                f"<small style='color:#94a3b8'>{hurst_label(h)}</small>",
-                unsafe_allow_html=True,
-            )
+    windows     = [("H 21d", "h_short"), ("H 63d", "h_medium"), ("H 252d", "h_long")]
+    tickers_ord = [t for t in ETF_UNIVERSE if t in conviction]
+    z_vals, text_vals = [], []
+    for ticker in tickers_ord:
+        c = conviction[ticker]
+        row_z, row_t = [], []
+        for _, key in windows:
+            h = c.get(key, 0.5)
+            row_z.append(h)
+            row_t.append(f"{h:.3f}<br>{hurst_label(h)}")
+        z_vals.append(row_z)
+        text_vals.append(row_t)
+
+    fig_hm = go.Figure(go.Heatmap(
+        z=z_vals,
+        x=[w[0] for w in windows],
+        y=tickers_ord,
+        text=text_vals,
+        texttemplate="%{text}",
+        textfont=dict(size=12, family="DM Sans"),
+        colorscale=[
+            [0.0,  "#dc2626"],   # red   — mean-reverting
+            [0.45, "#f97316"],   # orange
+            [0.55, "#d97706"],   # amber — random walk
+            [0.65, "#16a34a"],   # green — trending
+            [1.0,  "#052e16"],   # dark green — strong trend
+        ],
+        zmin=0.3, zmax=0.9,
+        showscale=True,
+        colorbar=dict(title="H", thickness=12, len=0.8),
+    ))
+    fig_hm.update_layout(
+        **CHART_LAYOUT, height=280,
+        title=f"Hurst Exponent Heatmap — {ohlcv.index[-1].date()}",
+        xaxis=dict(side="top"),
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_chart")
 
     st.divider()
 
-    # ── MTF history chart ─────────────────────────────────────────────────────
+    # ── Regime timeline ───────────────────────────────────────────────────────
     if show_mtf_history and mtf_hist is not None and not mtf_hist.empty:
-        st.markdown("#### Rolling Hurst History — Medium Window (63d)")
-        fig_h = go.Figure()
-        for ticker in ETF_UNIVERSE:
-            col = f"{ticker}_h_medium"
+        st.markdown("#### Regime Timeline — Which ETF Was Trending (63d)")
+        st.caption(
+            "Each band shows the fraction of days per month each ETF had H > 0.55 "
+            "on the 63d window. Taller band = more consistently trending that month."
+        )
+
+        # Resample to monthly: fraction of days each ETF was trending
+        trend_cols = {t: f"{t}_h_medium" for t in ETF_UNIVERSE
+                      if f"{t}_h_medium" in mtf_hist.columns}
+        if trend_cols:
+            trend_df = (mtf_hist[[c for c in trend_cols.values()]] > H_TRENDING).astype(float)
+            trend_df.columns = list(trend_cols.keys())
+            monthly  = trend_df.resample("ME").mean()
+
+            fig_rt = go.Figure()
+            for ticker in ETF_UNIVERSE:
+                if ticker not in monthly.columns:
+                    continue
+                fig_rt.add_trace(go.Bar(
+                    x=monthly.index,
+                    y=monthly[ticker],
+                    name=ticker,
+                    marker_color=etf_colour(ticker),
+                    hovertemplate="%{x|%b %Y}<br>" + ticker + ": %{y:.0%} trending days<extra></extra>",
+                ))
+            fig_rt.update_layout(
+                **CHART_LAYOUT, height=360,
+                barmode="stack",
+                yaxis_title="Fraction of ETFs Trending",
+                yaxis_tickformat=".0%",
+                yaxis_range=[0, len(trend_cols)],
+                title="Monthly Trending Regime Share — 63d Hurst > 0.55",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_rt, use_container_width=True, key="regime_timeline")
+
+        st.divider()
+
+        # ── Per-ETF H history: one focused ETF at a time ──────────────────────
+        st.markdown("#### Per-ETF Hurst History")
+        selected_etf = st.selectbox("Select ETF", ETF_UNIVERSE, key="etf_selector")
+        cols_etf = {
+            "21d":  f"{selected_etf}_h_short",
+            "63d":  f"{selected_etf}_h_medium",
+            "252d": f"{selected_etf}_h_long",
+        }
+        fig_etf = go.Figure()
+        line_styles = {"21d": dict(width=1, dash="dot"),
+                       "63d": dict(width=2),
+                       "252d": dict(width=1.5, dash="dash")}
+        for label, col in cols_etf.items():
             if col not in mtf_hist.columns:
                 continue
-            fig_h.add_trace(go.Scatter(
-                x=mtf_hist.index,
-                y=mtf_hist[col],
-                name=ticker,
-                line=dict(color=etf_colour(ticker), width=1.5),
-                hovertemplate=f"%{{x|%Y-%m-%d}}<br>H={'{y:.3f}'}<extra>{ticker}</extra>",
+            fig_etf.add_trace(go.Scatter(
+                x=mtf_hist.index, y=mtf_hist[col],
+                name=f"H {label}",
+                line=dict(color=etf_colour(selected_etf), **line_styles[label]),
+                opacity=0.9 if label == "63d" else 0.5,
             ))
-        # Regime zones
-        fig_h.add_hline(y=H_TRENDING, line=dict(color="#22c55e", dash="dash", width=1),
-                        annotation_text="Trending (0.55)", annotation_position="right")
-        fig_h.add_hline(y=H_RANDOM, line=dict(color="#ef4444", dash="dash", width=1),
-                        annotation_text="Mean-Rev (0.45)", annotation_position="right")
-        fig_h.add_hline(y=0.5, line=dict(color="#94a3b8", dash="dot", width=1))
-        fig_h.update_layout(
-            **CHART_LAYOUT, height=400,
+        fig_etf.add_hrect(y0=H_TRENDING, y1=0.9,
+                          fillcolor="#16a34a", opacity=0.05, line_width=0,
+                          annotation_text="Trending zone", annotation_position="top right")
+        fig_etf.add_hrect(y0=0.2, y1=H_RANDOM,
+                          fillcolor="#dc2626", opacity=0.05, line_width=0,
+                          annotation_text="Mean-rev zone", annotation_position="bottom right")
+        fig_etf.add_hline(y=H_TRENDING, line=dict(color="#16a34a", dash="dash", width=1))
+        fig_etf.add_hline(y=H_RANDOM,   line=dict(color="#dc2626", dash="dash", width=1))
+        fig_etf.update_layout(
+            **CHART_LAYOUT, height=350,
             yaxis_title="Hurst Exponent H",
-            yaxis_range=[0.2, 0.9],
-            title="Rolling 63d Hurst Exponent — All ETFs",
+            yaxis_range=[0.2, 0.95],
+            title=f"{selected_etf} — Hurst History (21d · 63d · 252d)",
         )
-        st.plotly_chart(fig_h, use_container_width=True, key="mtf_hist_chart")
+        st.plotly_chart(fig_etf, use_container_width=True, key="per_etf_chart")
 
-        # ── MTF alignment history ─────────────────────────────────────────────
-        st.markdown("#### Multi-Timeframe Alignment Over Time")
-        st.caption("Number of timeframes trending (H > 0.55) per ETF per day")
-        fig_align = go.Figure()
-        for ticker in ETF_UNIVERSE:
-            cs = [f"{ticker}_h_short", f"{ticker}_h_medium", f"{ticker}_h_long"]
-            available_cols = [c for c in cs if c in mtf_hist.columns]
-            if len(available_cols) < 2:
-                continue
-            align_series = (mtf_hist[available_cols] > H_TRENDING).sum(axis=1)
-            fig_align.add_trace(go.Scatter(
-                x=mtf_hist.index, y=align_series,
-                name=ticker,
-                line=dict(color=etf_colour(ticker), width=1.5),
-                opacity=0.8,
-            ))
-        fig_align.update_layout(
-            **CHART_LAYOUT, height=300,
-            yaxis_title="Trending Timeframes (0-3)",
-            yaxis=dict(tickvals=[0, 1, 2, 3]),
-            title="MTF Alignment History — Trending Timeframe Count",
-        )
-        st.plotly_chart(fig_align, use_container_width=True, key="mtf_align_chart")
     elif not show_mtf_history:
         st.info("Enable 'Show MTF history chart' in the sidebar to view this section.")
     else:
