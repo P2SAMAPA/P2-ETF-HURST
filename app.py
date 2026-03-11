@@ -187,7 +187,13 @@ if ohlcv is None:
     st.error("❌ No OHLCV data. Run the pipeline first.")
     st.stop()
 
-returns_df  = get_returns(ohlcv)
+# Debug: show column sample if returns fail
+try:
+    returns_df = get_returns(ohlcv)
+except Exception as e:
+    st.error(f"❌ Failed to parse OHLCV columns: {e}")
+    st.info(f"Column sample: {ohlcv.columns[:10].tolist()}")
+    st.stop()
 etf_ret     = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
 bm_ret      = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
 
