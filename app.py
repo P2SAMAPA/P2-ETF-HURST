@@ -31,6 +31,7 @@ try:
     from hurst_core import (
         compute_all_mtf, compute_divergence_scores,
         compute_sync_score, compute_conviction_scores,
+        compute_momentum_scores, optimise_momentum_weights,
         generate_signal, hurst_label, hurst_regime_colour,
         conviction_label, W_MTF, W_DIV, W_SYNC,
         SHORT_WINDOW, MEDIUM_WINDOW, LONG_WINDOW,
@@ -198,13 +199,14 @@ etf_ret     = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
 bm_ret      = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
 
 # ── Compute today's signal live from latest data ──────────────────────────────
-# Always compute live — Hurst is fast (~2s), no pipeline needed for signal
-with st.spinner("⚙️ Computing Hurst Confluence scores..."):
+with st.spinner("⚙️ Computing Hurst Confluence + Momentum scores..."):
     mtf_today  = compute_all_mtf(etf_ret)
     div_scores = compute_divergence_scores(mtf_today, mtf_hist)
     sync       = compute_sync_score(mtf_today)
     conviction = compute_conviction_scores(mtf_today, div_scores, sync)
-    signal     = generate_signal(conviction)
+    mom_w, w3m = optimise_momentum_weights(etf_ret, conviction, train_window=252)
+    mom_scores = compute_momentum_scores(etf_ret, w3m=w3m)
+    signal     = generate_signal(conviction, mom_scores, mom_weight=mom_w, w3m=w3m)
 
 # ── Staleness warning ─────────────────────────────────────────────────────────
 from datetime import date as _date
@@ -240,6 +242,7 @@ with tab_signal:
         Conviction: <strong style="color:{conv_colour}">{conv_label}</strong>
         &nbsp;·&nbsp; Score: {conv_score:.3f}
         &nbsp;·&nbsp; MTF {W_MTF:.0%} · Divergence {W_DIV:.0%} · Sync {W_SYNC:.0%}
+        &nbsp;·&nbsp; Mom {mom_w:.0%} (3m:{w3m:.0%}/6m:{1-w3m:.0%})
       </div>
     </div>
     """, unsafe_allow_html=True)
