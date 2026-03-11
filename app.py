@@ -229,9 +229,12 @@ with tab_signal:
                    "#22c55e" if conv_label == "High" else
                    "#f59e0b" if conv_label == "Moderate" else "#ef4444")
 
+    # Next trading day from last data date
+    next_trade_day = pd.offsets.BDay(1).apply(ohlcv.index[-1]).date()
+
     st.markdown(f"""
     <div class="hero-card">
-      <div class="hero-label">Next Trading Day Signal — {ohlcv.index[-1].date()}</div>
+      <div class="hero-label">Next Trading Day Signal — {next_trade_day}</div>
       <div class="hero-ticker" style="color:{conv_colour}">{top_etf}</div>
       <div class="hero-meta">
         Conviction: <strong style="color:{conv_colour}">{conv_label}</strong>
