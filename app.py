@@ -36,7 +36,7 @@ try:
         velocity_label, velocity_colour,
         conviction_label, W_MTF, W_DIV, W_SYNC,
         MEDIUM_WINDOW, LONG_WINDOW, VELOCITY_WINDOW,
-        H_TRENDING, H_RANDOM,
+        H_TRENDING, H_WEAK_TREND, H_RANDOM,
     )
     from walkforward import compute_wf_metrics
 except ImportError as e:
@@ -355,7 +355,7 @@ with tab_mtf:
 
     # ── Heatmap: ETF × Timeframe ──────────────────────────────────────────────
     st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
-    st.caption("H columns: Green = trending (H > 0.55) · Amber = random walk · Red = mean-reverting")
+    st.caption("H columns: Dark green = Strong Trend (>0.65) · Green = Mild Trend (>0.55) · Yellow-green = Weak Trend (0.50–0.55) · Amber = Random Walk · Red = Mean-Reverting")
 
     # Build two separate heatmaps: velocity (col 0) and H values (cols 1-2)
     # They have different scales and colour logic so must be rendered as subplots
@@ -408,11 +408,12 @@ with tab_mtf:
         text=h_t, texttemplate="%{text}",
         textfont=dict(size=12, family="DM Sans"),
         colorscale=[
-            [0.0,  "#dc2626"],
-            [0.45, "#f97316"],
-            [0.55, "#d97706"],
-            [0.65, "#16a34a"],
-            [1.0,  "#052e16"],
+            [0.0,   "#dc2626"],   # 0.30 — mean-reverting
+            [0.25,  "#f97316"],   # 0.45 — random walk
+            [0.333, "#d97706"],   # 0.50 — random walk top
+            [0.417, "#84cc16"],   # 0.55 — weak trend (0.50-0.55)
+            [0.50,  "#16a34a"],   # 0.60 — mild trend
+            [1.0,   "#052e16"],   # 0.90 — strong trend
         ],
         zmin=0.3, zmax=0.9,
         showscale=True,
