@@ -135,7 +135,7 @@ with st.sidebar:
     show_sync    = st.toggle("Show cross-asset sync", value=True)
     st.divider()
 
-    run_btn     = st.button("🚀 Run Model", type="primary", use_container_width=True)
+    run_btn     = None  # signal computed automatically on load
     refresh_btn = st.button("🔄 Force Data Refresh", use_container_width=True)
 
     if refresh_btn:
@@ -198,13 +198,13 @@ etf_ret     = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
 bm_ret      = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
 
 # ── Compute today's signal live from latest data ──────────────────────────────
-if run_btn or True:   # always compute on load for freshness
-    with st.spinner("⚙️ Computing Hurst Confluence scores..."):
-        mtf_today  = compute_all_mtf(etf_ret)
-        div_scores = compute_divergence_scores(mtf_today, mtf_hist)
-        sync       = compute_sync_score(mtf_today)
-        conviction = compute_conviction_scores(mtf_today, div_scores, sync)
-        signal     = generate_signal(conviction)
+# Always compute live — Hurst is fast (~2s), no pipeline needed for signal
+with st.spinner("⚙️ Computing Hurst Confluence scores..."):
+    mtf_today  = compute_all_mtf(etf_ret)
+    div_scores = compute_divergence_scores(mtf_today, mtf_hist)
+    sync       = compute_sync_score(mtf_today)
+    conviction = compute_conviction_scores(mtf_today, div_scores, sync)
+    signal     = generate_signal(conviction)
 
 # ── Staleness warning ─────────────────────────────────────────────────────────
 from datetime import date as _date
@@ -476,7 +476,21 @@ with tab_wf:
         st.info("Walk-forward results not available yet — trigger the pipeline.")
         st.stop()
 
+    # Handle both new format (cum_strategy) and old Hawkes format (cum_A)
+    if "cum_strategy" in wf_df.columns:
+        cum_col = "cum_strategy"
+        ret_col = "ret"
+    elif "cum_A" in wf_df.columns:
+        cum_col = "cum_A"
+        ret_col = "ret_A"
+    else:
+        st.warning(f"Walk-forward columns not recognised: {wf_df.columns.tolist()} — re-run the pipeline.")
+        st.stop()
+
     metrics = compute_wf_metrics(wf_df)
+    if not metrics:
+        st.info("Walk-forward data format unrecognised — trigger a fresh pipeline run.")
+        st.stop()
 
     # ── Benchmark metrics ─────────────────────────────────────────────────────
     bm_ann, bm_sharpe, bm_dd = 0.0, 0.0, 0.0
@@ -505,7 +519,7 @@ with tab_wf:
     # ── Cumulative return chart ────────────────────────────────────────────────
     fig_wf = go.Figure()
     fig_wf.add_trace(go.Scatter(
-        x=wf_df.index, y=wf_df["cum_strategy"],
+        x=wf_df.index, y=wf_df[cum_col],
         name="HRC Strategy (OOS)",
         line=dict(color="#22d3ee", width=2.5),
         fill="tozeroy", fillcolor="rgba(34,211,238,0.05)",
@@ -543,9 +557,8 @@ with tab_wf:
         )
         st.plotly_chart(fig_dist, use_container_width=True, key="sig_dist_chart")
 
-        # ── Rolling 252d return ───────────────────────────────────────────────
         st.markdown("#### Rolling 252-Day Annualised Return")
-        roll_ret = wf_df["ret"].rolling(252).apply(
+        roll_ret = wf_df[ret_col].rolling(252).apply(
             lambda x: (np.prod(1 + x) ** (252/len(x)) - 1), raw=True
         )
         fig_roll = go.Figure()
