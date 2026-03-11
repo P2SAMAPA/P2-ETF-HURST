@@ -30,9 +30,9 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 # -- Timeframe windows --------------------------------------------------------
-SHORT_WINDOW  = 21
-MEDIUM_WINDOW = 63
-LONG_WINDOW   = 252
+SHORT_WINDOW  = 42    # ~2 months — minimum viable DFA window
+MEDIUM_WINDOW = 63    # ~1 quarter — core signal window
+LONG_WINDOW   = 126   # ~6 months — medium-term regime
 
 # -- Regime thresholds --------------------------------------------------------
 H_TRENDING     = 0.55
@@ -46,7 +46,7 @@ BENCHMARKS   = ["SPY", "AGG"]
 MOM_WEIGHT_GRID = [0.10, 0.20, 0.30]   # total momentum weight vs HRC
 MOM_3M_GRID     = [0.30, 0.50, 0.70]   # fraction of mom weight on 3m (rest = 6m)
 MOM_3M_WINDOW   = 63                    # ~3 months
-MOM_6M_WINDOW   = 126                   # ~6 months
+MOM_6M_WINDOW   = 126                   # ~6 months (now same as LONG_WINDOW — intentional)
 
 
 # =============================================================================
@@ -72,16 +72,18 @@ def hurst_dfa(series: np.ndarray) -> float:
     series = np.array(series, dtype=float)
     series = series[~np.isnan(series)]
     n = len(series)
-    if n < 20:
+    if n < 32:          # need at least 32 points for meaningful DFA
         return 0.5
 
     # Integrate
     y = np.cumsum(series - np.mean(series))
 
-    # Window sizes: log-spaced, min=4, max=n//4
-    min_s  = max(4, n // 16)
-    max_s  = max(min_s + 1, n // 4)
-    n_wins = min(20, max_s - min_s + 1)
+    # Window sizes: log-spaced
+    # min_s = 8 (need ≥2 segments minimum, each ≥4 points)
+    # max_s = n//3 (leave room for at least 3 segments)
+    min_s  = max(8, n // 12)
+    max_s  = max(min_s + 1, n // 3)
+    n_wins = min(16, max_s - min_s + 1)
     sizes  = np.unique(
         np.round(np.logspace(np.log10(min_s), np.log10(max_s), n_wins)).astype(int)
     )
