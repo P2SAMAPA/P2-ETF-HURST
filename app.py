@@ -428,8 +428,6 @@ with tab_mtf:
                 yaxis_tickformat=".0%",
                 yaxis_range=[0, len(trend_cols)],
                 title="Monthly Trending Regime Share — 63d Hurst > 0.55",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            xanchor="right", x=1),
             )
             st.plotly_chart(fig_rt, use_container_width=True, key="regime_timeline")
 
