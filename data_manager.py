@@ -212,16 +212,22 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
         return existing
 
     new_df = pd.concat(frames, axis=1)
-    # Ensure new_df has the same column MultiIndex as existing (it should already,
-    # because fetch_ticker_ohlcv returns MultiIndex). However, if the existing DataFrame
-    # has a different column order or extra fields, we align by taking the union of columns.
-    # We'll reindex new_df to match existing's columns, filling missing with NaN.
-    # This also handles the case where existing might have fields not present in new data.
-    # Use .reindex with columns=existing.columns, which works for MultiIndex.
-    new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
 
-    # Concatenate and drop duplicates (keep last)
+    # Ensure both DataFrames have unique columns (no duplicates)
+    existing = existing.loc[:, ~existing.columns.duplicated()]
+    new_df = new_df.loc[:, ~new_df.columns.duplicated()]
+
+    # Combine column sets (union) to ensure both have the same columns
+    all_cols = existing.columns.union(new_df.columns)
+
+    # Reindex both to the union, fill missing with NaN
+    existing = existing.reindex(columns=all_cols, fill_value=np.nan)
+    new_df = new_df.reindex(columns=all_cols, fill_value=np.nan)
+
+    # Concatenate rows
     updated = pd.concat([existing, new_df])
+
+    # Drop duplicate indices (keep last) and sort
     updated = updated[~updated.index.duplicated(keep="last")].sort_index()
     return updated.ffill()
 
