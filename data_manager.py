@@ -180,7 +180,20 @@ def build_full_dataset(start: str = "2008-01-01") -> pd.DataFrame:
         time.sleep(random.uniform(1.0, 2.5))
     if not frames:
         raise RuntimeError("No data fetched.")
-    out = pd.concat(frames, axis=1)
+    # Build MultiIndex columns (ticker, field) for consistency
+    # Each df has flat columns ticker_open, ticker_high, etc.
+    # We'll convert to MultiIndex
+    multi_frames = []
+    for df in frames:
+        # Extract ticker from column names
+        ticker = df.columns[0].split('_')[0]
+        # Convert to MultiIndex: (ticker, field)
+        # Columns are like 'TLT_Open', 'TLT_High', etc.
+        # We need to rename to 'Open', 'High' etc. and set MultiIndex
+        df.columns = [col.replace(f"{ticker}_", "") for col in df.columns]
+        df.columns = pd.MultiIndex.from_tuples([(ticker, col) for col in df.columns])
+        multi_frames.append(df)
+    out = pd.concat(multi_frames, axis=1)
     return out[~out.index.duplicated(keep="last")].sort_index().ffill()
 
 
@@ -193,6 +206,7 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
         log.info("Data already up to date.")
         return existing
 
+    # Fetch new data for each ticker
     frames = []
     for ticker in ALL_TICKERS:
         df = fetch_ticker_ohlcv(ticker, start_new,
@@ -204,24 +218,26 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
     if not frames:
         return existing
 
-    new_df = pd.concat(frames, axis=1)
+    # Convert each fetched DataFrame to the same MultiIndex format as existing
+    multi_frames = []
+    for df in frames:
+        ticker = df.columns[0].split('_')[0]
+        # Rename columns to remove ticker prefix
+        df.columns = [col.replace(f"{ticker}_", "") for col in df.columns]
+        # Create MultiIndex columns
+        df.columns = pd.MultiIndex.from_tuples([(ticker, col) for col in df.columns])
+        multi_frames.append(df)
 
-    # Ensure new_df has the same column MultiIndex as existing
-    # (existing columns might have more tickers/fields; we align)
-    if isinstance(new_df.columns, pd.MultiIndex) and isinstance(existing.columns, pd.MultiIndex):
-        # Reindex columns to match existing's levels
-        # We need to keep all existing columns, filling missing with NaN
-        new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
-    elif not isinstance(new_df.columns, pd.MultiIndex) and not isinstance(existing.columns, pd.MultiIndex):
-        # Simple columns: just align
-        new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
-    else:
-        # If structures differ, we should raise an error or force rebuild
-        log.error("Column structure mismatch – please reseed the dataset")
-        return existing
+    # Concatenate new data
+    new_df = pd.concat(multi_frames, axis=1)
+    # Align columns with existing
+    new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
 
+    # Concatenate and deduplicate
     updated = pd.concat([existing, new_df])
-    return updated[~updated.index.duplicated(keep="last")].sort_index().ffill()
+    updated = updated[~updated.index.duplicated(keep="last")].sort_index().ffill()
+    log.info(f"Incremental update: added {len(updated)-len(existing)} rows")
+    return updated
 
 
 def save_to_hf(files: dict, commit_message: str = "Daily update") -> bool:
