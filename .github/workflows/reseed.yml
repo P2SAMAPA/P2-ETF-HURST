@@ -1,5 +1,6 @@
-# reseed.yml — P2-ETF-HAWKES
+# reseed.yml — P2-ETF-HURST
 # ONE-TIME manual workflow to seed the full OHLCV dataset from 2008.
+# Seeds both Option A (FI/Commodities) and Option B (Equity Sectors).
 # Run this ONCE after creating the HF dataset repo.
 # Trigger manually from GitHub Actions UI only.
 
@@ -29,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run full OHLCV reseed from 2008
+      - name: Run full OHLCV reseed from 2008 (both universes)
         run: python reseed.py
 
       - name: Log completion
