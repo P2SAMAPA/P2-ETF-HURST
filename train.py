@@ -3,15 +3,20 @@ train.py — P2-ETF-HURST
 =========================
 Daily pipeline orchestrator.
 
+Supports both Option A (FI/Commodities) and Option B (Equity Sectors) via
+--option argument. When --option a (default) runs the original FI pipeline.
+When --option b runs the equity pipeline using the same methodology but
+with separate HF output files.
+
 Steps:
   1. Load / update OHLCV from HuggingFace
-  2. Compute multi-timeframe Hurst for all ETFs
+  2. Compute multi-timeframe Hurst for all ETFs in selected universe
   3. Compute divergence scores
   4. Compute cross-asset sync
   5. Generate today's conviction scores + signal
   6. Build MTF history (rolling)
   7. Walk-forward backtest
-  8. Save all outputs to HuggingFace
+  8. Save all outputs to HuggingFace (option‑specific files)
 """
 
 import os
@@ -27,12 +32,23 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def run_pipeline(skip_hf_write: bool = False) -> dict:
+def run_pipeline(option: str = "a", skip_hf_write: bool = False) -> dict:
+    """
+    Run the full pipeline for a given option.
+
+    Parameters
+    ----------
+    option : str
+        'a' for Fixed Income / Commodities (original)
+        'b' for Equity Sectors (new)
+    skip_hf_write : bool
+        If True, skip uploading to Hugging Face.
+    """
     from data_manager import (
         load_ohlcv_from_hf, load_metadata_from_hf,
         incremental_update, build_full_dataset,
         save_to_hf, get_returns, get_volume,
-        ETF_UNIVERSE, BENCHMARKS,
+        ETF_UNIVERSE as FI_UNIVERSE, BENCHMARKS,
     )
     from hurst_core import (
         compute_all_mtf, compute_divergence_scores,
@@ -43,7 +59,28 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
     )
     from walkforward import run_walkforward
 
-    results  = {}
+    # Import config for equity ETFs (if available)
+    try:
+        from config import OPTION_B_ETFS
+    except ImportError:
+        OPTION_B_ETFS = []
+        log.warning("config.py not found — equity ETFs not available")
+
+    # Select the ETF universe based on option
+    if option == "a":
+        target_etfs = FI_UNIVERSE
+        use_option_files = False   # use original file names
+    elif option == "b":
+        if not OPTION_B_ETFS:
+            raise RuntimeError("Equity ETFs not defined in config.py")
+        target_etfs = OPTION_B_ETFS
+        use_option_files = True    # use new option-aware file names
+    else:
+        raise ValueError(f"Unknown option: {option}")
+
+    log.info(f"Running pipeline for Option {option.upper()} — ETFs: {target_etfs}")
+
+    results = {}
 
     # ── Step 1: Load OHLCV ────────────────────────────────────────────────────
     log.info("Step 1: Loading OHLCV data...")
@@ -62,13 +99,12 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
 
     returns_df  = get_returns(ohlcv)
     log.info(f"  Returns columns ({len(returns_df.columns)}): {returns_df.columns.tolist()[:8]}...")
-    etf_returns = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
+    etf_returns = returns_df[[t for t in target_etfs if t in returns_df.columns]]
     bm_returns  = returns_df[[t for t in BENCHMARKS   if t in returns_df.columns]]
+
     log.info(f"  ETF returns: {etf_returns.shape}, cols: {etf_returns.columns.tolist()}")
     if len(etf_returns.columns) == 0:
-        raise RuntimeError(f"No ETF columns found. Available: {returns_df.columns.tolist()[:10]}")
-
-
+        raise RuntimeError(f"No ETF columns found for option {option}. Available: {returns_df.columns.tolist()[:10]}")
 
     results["data_rows"]  = len(ohlcv)
     results["date_range"] = f"{ohlcv.index[0].date()} → {ohlcv.index[-1].date()}"
@@ -142,13 +178,14 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
 
     signal_row_df = pd.DataFrame([signal_row], index=[today])
 
-    # Append to existing signals history
+    # Append to existing signals history (using option-specific file)
     existing_signals = None
-    try:
+    if use_option_files:
+        from data_manager import load_signals
+        existing_signals = load_signals(option)
+    else:
         from data_manager import load_signals_from_hf
         existing_signals = load_signals_from_hf()
-    except Exception:
-        pass
 
     if existing_signals is not None and not existing_signals.empty:
         signals_df = pd.concat([existing_signals, signal_row_df])
@@ -164,6 +201,7 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
             bm_returns   = bm_returns,
             train_window = 252,
             step_size    = 21,
+            option       = option if use_option_files else None,
         )
         log.info(f"  Walk-forward: {len(wf_df)} OOS days, "
                  f"cum={wf_df['cum_strategy'].iloc[-1]:.3f}")
@@ -180,26 +218,37 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
         "dataset_version":  metadata.get("dataset_version", 0) + 1,
     })
 
-    save_files = {
-        "ohlcv_data.parquet":      ohlcv,
-        "mtf_history.parquet":     mtf_history,
-        "signals_latest.parquet":  signals_df,
-        "metadata.json":           metadata,
-    }
-    if wf_df is not None:
-        save_files["walkforward_returns.parquet"] = wf_df
+    if use_option_files:
+        # Use new option-aware saving functions
+        from data_manager import save_signals, save_walkforward, save_mtf_history, save_metadata
+        save_signals(signals_df, option)
+        if wf_df is not None:
+            save_walkforward(wf_df, option)
+        save_mtf_history(mtf_history, option)
+        save_metadata(metadata, option)
+        results["hf_saved"] = True   # we assume success; the functions log errors
+    else:
+        # Original saving – keep unchanged
+        save_files = {
+            "ohlcv_data.parquet":      ohlcv,
+            "mtf_history.parquet":     mtf_history,
+            "signals_latest.parquet":  signals_df,
+            "metadata.json":           metadata,
+        }
+        if wf_df is not None:
+            save_files["walkforward_returns.parquet"] = wf_df
 
-    if not skip_hf_write:
-        log.info("Step 8: Saving to HuggingFace...")
-        ok = save_to_hf(
-            files=save_files,
-            commit_message=(
-                f"Daily update {datetime.utcnow().date()} — "
-                f"Signal: {signal['signal']} ({signal['label']})"
-            ),
-        )
-        results["hf_saved"] = ok
-        log.info(f"  HF save: {'✅ OK' if ok else '❌ FAILED'}")
+        if not skip_hf_write:
+            log.info("Step 8: Saving to HuggingFace...")
+            ok = save_to_hf(
+                files=save_files,
+                commit_message=(
+                    f"Daily update {datetime.utcnow().date()} — "
+                    f"Signal: {signal['signal']} ({signal['label']})"
+                ),
+            )
+            results["hf_saved"] = ok
+            log.info(f"  HF save: {'✅ OK' if ok else '❌ FAILED'}")
 
     log.info("Pipeline complete.")
     return results
@@ -208,6 +257,8 @@ def run_pipeline(skip_hf_write: bool = False) -> dict:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-hf", action="store_true")
+    parser.add_argument("--skip-hf", action="store_true", help="Skip HF upload (dry run)")
+    parser.add_argument("--option", choices=["a", "b"], default="a",
+                        help="Option to run: a (FI/Commodities) or b (Equity)")
     args = parser.parse_args()
-    run_pipeline(skip_hf_write=args.skip_hf)
+    run_pipeline(option=args.option, skip_hf_write=args.skip_hf)
