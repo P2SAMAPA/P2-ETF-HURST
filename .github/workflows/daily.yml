@@ -6,31 +6,52 @@ on:
   workflow_dispatch:
 
 jobs:
-  train:
+  train_option_a:
+    name: Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Run HRC pipeline
+      - name: Run HRC pipeline (Option A)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python train.py
-
-      - name: Upload logs
+        run: python train.py --option a
+      - name: Upload logs (Option A)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-logs-${{ github.run_id }}
+          name: pipeline-logs-a-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
+
+  train_option_b:
+    name: Option B (Equity Sectors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run HRC pipeline (Option B)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python train.py --option b
+      - name: Upload logs (Option B)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-b-${{ github.run_id }}
           path: "*.log"
           retention-days: 7
