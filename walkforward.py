@@ -24,7 +24,7 @@ from hurst_core import (
     compute_sync_score, compute_conviction_scores,
     compute_momentum_scores, optimise_momentum_weights,
     generate_signal, build_mtf_history,
-    ETF_UNIVERSE, BENCHMARKS,
+    BENCHMARKS,  # keep for benchmark columns
 )
 
 TRAIN_WINDOW = 252
@@ -37,11 +37,30 @@ def run_walkforward(
     bm_returns:   pd.DataFrame,
     train_window: int = TRAIN_WINDOW,
     step_size:    int = STEP_SIZE,
+    option:       str = None,   # added for compatibility, not used in this function
 ) -> pd.DataFrame:
     """
     Walk-forward backtest using DFA Hurst Confluence + optimised momentum blend.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        DataFrame of ETF returns, columns are tickers. Assumed to be already
+        filtered to the correct universe (FI or Equity).
+    bm_returns : pd.DataFrame
+        Benchmark returns (SPY, AGG).
+    train_window, step_size : int
+        Window lengths.
+    option : str, optional
+        Option identifier (a or b) – not used here but kept for API consistency.
+
+    Returns
+    -------
+    pd.DataFrame
+        Walk-forward results with columns: date (index), signal, ret, etc.
     """
-    etf_cols = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    # Use columns present in returns_df (already filtered)
+    etf_cols = returns_df.columns.tolist()
     n        = len(returns_df)
     dates    = returns_df.index
 
