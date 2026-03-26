@@ -151,17 +151,24 @@ def get_volume(ohlcv: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_ticker_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame | None:
+    """Fetch OHLCV for a single ticker and return a DataFrame with MultiIndex columns (ticker, field)."""
     try:
         import yfinance as yf
         df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
         if df.empty:
             return None
+        # Flatten MultiIndex columns if present (yfinance returns columns like (Open, Ticker) sometimes)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join(c).strip().lower() for c in df.columns]
-        else:
-            df.columns = [c.lower() for c in df.columns]
-        df.columns = [f"{ticker}_{c}" for c in df.columns]
-        df.index   = pd.to_datetime(df.index)
+            df.columns = [col[0] for col in df.columns]
+        # Keep only OHLCV fields
+        fields = ["Open", "High", "Low", "Close", "Volume"]
+        existing = [f for f in fields if f in df.columns]
+        if not existing:
+            return None
+        df = df[existing].copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        # Convert to MultiIndex columns: (ticker, field)
+        df.columns = pd.MultiIndex.from_product([[ticker], df.columns])
         return df
     except Exception as e:
         log.error(f"Failed to fetch {ticker}: {e}")
@@ -180,20 +187,7 @@ def build_full_dataset(start: str = "2008-01-01") -> pd.DataFrame:
         time.sleep(random.uniform(1.0, 2.5))
     if not frames:
         raise RuntimeError("No data fetched.")
-    # Build MultiIndex columns (ticker, field) for consistency
-    # Each df has flat columns ticker_open, ticker_high, etc.
-    # We'll convert to MultiIndex
-    multi_frames = []
-    for df in frames:
-        # Extract ticker from column names
-        ticker = df.columns[0].split('_')[0]
-        # Convert to MultiIndex: (ticker, field)
-        # Columns are like 'TLT_Open', 'TLT_High', etc.
-        # We need to rename to 'Open', 'High' etc. and set MultiIndex
-        df.columns = [col.replace(f"{ticker}_", "") for col in df.columns]
-        df.columns = pd.MultiIndex.from_tuples([(ticker, col) for col in df.columns])
-        multi_frames.append(df)
-    out = pd.concat(multi_frames, axis=1)
+    out = pd.concat(frames, axis=1)
     return out[~out.index.duplicated(keep="last")].sort_index().ffill()
 
 
@@ -206,7 +200,6 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
         log.info("Data already up to date.")
         return existing
 
-    # Fetch new data for each ticker
     frames = []
     for ticker in ALL_TICKERS:
         df = fetch_ticker_ohlcv(ticker, start_new,
@@ -218,26 +211,19 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
     if not frames:
         return existing
 
-    # Convert each fetched DataFrame to the same MultiIndex format as existing
-    multi_frames = []
-    for df in frames:
-        ticker = df.columns[0].split('_')[0]
-        # Rename columns to remove ticker prefix
-        df.columns = [col.replace(f"{ticker}_", "") for col in df.columns]
-        # Create MultiIndex columns
-        df.columns = pd.MultiIndex.from_tuples([(ticker, col) for col in df.columns])
-        multi_frames.append(df)
-
-    # Concatenate new data
-    new_df = pd.concat(multi_frames, axis=1)
-    # Align columns with existing
+    new_df = pd.concat(frames, axis=1)
+    # Ensure new_df has the same column MultiIndex as existing (it should already,
+    # because fetch_ticker_ohlcv returns MultiIndex). However, if the existing DataFrame
+    # has a different column order or extra fields, we align by taking the union of columns.
+    # We'll reindex new_df to match existing's columns, filling missing with NaN.
+    # This also handles the case where existing might have fields not present in new data.
+    # Use .reindex with columns=existing.columns, which works for MultiIndex.
     new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
 
-    # Concatenate and deduplicate
+    # Concatenate and drop duplicates (keep last)
     updated = pd.concat([existing, new_df])
-    updated = updated[~updated.index.duplicated(keep="last")].sort_index().ffill()
-    log.info(f"Incremental update: added {len(updated)-len(existing)} rows")
-    return updated
+    updated = updated[~updated.index.duplicated(keep="last")].sort_index()
+    return updated.ffill()
 
 
 def save_to_hf(files: dict, commit_message: str = "Daily update") -> bool:
