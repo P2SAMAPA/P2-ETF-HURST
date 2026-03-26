@@ -3,6 +3,8 @@ app.py — P2-ETF-HURST
 ======================
 Streamlit dashboard for the Hurst Confluence ETF Rotation signal.
 Reads all data from HuggingFace — no computation in the UI.
+
+Now supports both Option A (FI/Commodities) and Option B (Equity Sectors).
 """
 
 import os
@@ -26,7 +28,11 @@ try:
         load_ohlcv_from_hf, load_mtf_history_from_hf,
         load_signals_from_hf, load_walkforward_from_hf,
         load_metadata_from_hf, get_returns,
-        ETF_UNIVERSE, BENCHMARKS,
+        ETF_UNIVERSE as FI_UNIVERSE, BENCHMARKS,
+    )
+    # New option-aware functions
+    from data_manager import (
+        load_signals, load_walkforward, load_mtf_history, load_metadata,
     )
     from hurst_core import (
         compute_all_mtf, compute_divergence_scores,
@@ -39,11 +45,13 @@ try:
         H_TRENDING, H_WEAK_TREND, H_RANDOM,
     )
     from walkforward import compute_wf_metrics
+    # Import config for equity ETFs
+    from config import OPTION_B_ETFS
 except ImportError as e:
     st.error(f"Import error: {e}")
     st.stop()
 
-# ── Styling ───────────────────────────────────────────────────────────────────
+# ── Styling (unchanged) ───────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -104,24 +112,34 @@ CHART_LAYOUT = dict(
     paper_bgcolor="#ffffff",
 )
 
-ETF_COLOURS = {
+# Colour maps for both universes
+FI_COLOURS = {
     "TLT": "#3b82f6", "LQD": "#8b5cf6", "HYG": "#ef4444",
     "VNQ": "#14b8a6", "GLD": "#f59e0b", "SLV": "#6b7280",
 }
-
-def etf_colour(t): return ETF_COLOURS.get(t, "#94a3b8")
+EQ_COLOURS = {
+    "SPY": "#3b82f6", "QQQ": "#14b8a6", "XLK": "#8b5cf6",
+    "XLF": "#ef4444", "XLE": "#f59e0b", "XLV": "#10b981",
+    "XLI": "#6b7280", "XLY": "#ec4899", "XLP": "#84cc16",
+    "XLU": "#06b6d4", "GDX": "#f97316", "XME": "#a855f7",
+}
+def etf_colour(t, option='a'):
+    if option == 'a':
+        return FI_COLOURS.get(t, "#94a3b8")
+    else:
+        return EQ_COLOURS.get(t, "#94a3b8")
 
 # ── Cached loaders ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_ohlcv():       return load_ohlcv_from_hf()
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load_mtf():         return load_mtf_history_from_hf()
+def cached_load_mtf(option='a'): return load_mtf_history(option) if option != 'a' else load_mtf_history_from_hf()
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load_signals():     return load_signals_from_hf()
+def cached_load_signals(option='a'): return load_signals(option) if option != 'a' else load_signals_from_hf()
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load_wf():          return load_walkforward_from_hf()
+def cached_load_wf(option='a'): return load_walkforward(option) if option != 'a' else load_walkforward_from_hf()
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load_metadata():    return load_metadata_from_hf()
+def cached_load_metadata(option='a'): return load_metadata(option) if option != 'a' else load_metadata_from_hf()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -166,73 +184,58 @@ with st.sidebar:
 st.title("📐 P2-ETF-HURST")
 st.caption(
     "Hurst Confluence · H63 Velocity · Medium (63d) · Long (126d) · "
-    "Regime Divergence · Cross-Asset Synchronisation · "
-    f"ETFs: {' · '.join(ETF_UNIVERSE)}"
+    "Regime Divergence · Cross-Asset Synchronisation"
 )
 
-tab_signal, tab_mtf, tab_wf, tab_about = st.tabs([
-    "🎯 Signal & Scores",
-    "📊 MTF Analysis",
-    "📈 Walk-Forward Backtest",
-    "ℹ️ About",
+# Create two tabs: Option A (FI) and Option B (Equity)
+tab_a, tab_b = st.tabs([
+    "🌊 Option A — Fixed Income / Commodities",
+    "📈 Option B — Equity Sectors",
 ])
 
-# ── Load data ─────────────────────────────────────────────────────────────────
-with st.spinner("📥 Loading data from HuggingFace..."):
+# ------------------------------------------------------------------------------
+# Helper function to render a complete option tab
+def render_option_tab(option: str, etf_list: list, option_label: str):
+    """Render all content for a given option (a or b)."""
+    st.caption(f"ETFs: {' · '.join(etf_list)}")
+
+    # Load option-specific data
     ohlcv      = cached_load_ohlcv()
-    mtf_hist   = cached_load_mtf()
-    signals_df = cached_load_signals()
-    wf_df      = cached_load_wf()
-    metadata   = cached_load_metadata() or {}
+    mtf_hist   = cached_load_mtf(option)
+    signals_df = cached_load_signals(option)
+    wf_df      = cached_load_wf(option)
+    metadata   = cached_load_metadata(option) or {}
 
-if ohlcv is None:
-    st.error("❌ No OHLCV data. Run the pipeline first.")
-    st.stop()
+    if ohlcv is None:
+        st.error("❌ No OHLCV data. Run the pipeline first.")
+        return
 
-# Debug: show column sample if returns fail
-try:
+    # Compute returns and select relevant columns
     returns_df = get_returns(ohlcv)
-except Exception as e:
-    st.error(f"❌ Failed to parse OHLCV columns: {e}")
-    st.info(f"Column sample: {ohlcv.columns[:10].tolist()}")
-    st.stop()
-etf_ret     = returns_df[[t for t in ETF_UNIVERSE if t in returns_df.columns]]
-bm_ret      = returns_df[[t for t in BENCHMARKS  if t in returns_df.columns]]
+    etf_ret    = returns_df[[t for t in etf_list if t in returns_df.columns]]
+    bm_ret     = returns_df[[t for t in BENCHMARKS if t in returns_df.columns]]
 
-# ── Compute today's signal live from latest data ──────────────────────────────
-with st.spinner("⚙️ Computing Hurst Confluence + Momentum scores..."):
+    # Compute today's signal from latest data
     mtf_today  = compute_all_mtf(etf_ret)
-    div_scores = compute_divergence_scores(mtf_today, mtf_hist)
+    div_scores = compute_divergence_scores(mtf_today, mtf_hist) if mtf_hist is not None else {}
     sync       = compute_sync_score(mtf_today)
     conviction = compute_conviction_scores(mtf_today, div_scores, sync)
     mom_w, w3m = optimise_momentum_weights(etf_ret, conviction, train_window=252)
     mom_scores = compute_momentum_scores(etf_ret, w3m=w3m)
     signal     = generate_signal(conviction, mom_scores, mom_weight=mom_w, w3m=w3m)
 
-# ── Staleness warning ─────────────────────────────────────────────────────────
-from datetime import date as _date
-data_date  = ohlcv.index[-1].date()
-days_stale = (_date.today() - data_date).days
-if days_stale > 3:
-    st.warning(f"⚠️ Data is {days_stale} days old (last: {data_date}). "
-               "Click **Force Data Refresh** to update.")
+    data_date  = ohlcv.index[-1].date()
+    days_stale = (datetime.utcnow().date() - data_date).days
+    if days_stale > 3:
+        st.warning(f"⚠️ Data is {days_stale} days old (last: {data_date}). Click **Force Data Refresh** to update.")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — SIGNAL & SCORES
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_signal:
-
-    # ── Hero banner ───────────────────────────────────────────────────────────
+    # Hero banner
     top_etf    = signal["signal"]
     conv_label = signal["label"]
     conv_score = signal["score"]
-    top_data   = conviction.get(top_etf, {})
-
     conv_colour = ("#22d3ee" if conv_label == "Very High" else
                    "#22c55e" if conv_label == "High" else
                    "#f59e0b" if conv_label == "Moderate" else "#ef4444")
-
-    # Next trading day from last data date
     next_trade_day = (ohlcv.index[-1] + pd.offsets.BDay(1)).date()
 
     st.markdown(f"""
@@ -248,11 +251,10 @@ with tab_signal:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Conviction score breakdown ────────────────────────────────────────────
+    # Conviction rankings
     st.subheader("🏆 ETF Conviction Rankings")
-
     ranked = signal["ranked"]
-    cols   = st.columns(len(ETF_UNIVERSE))
+    cols   = st.columns(len(etf_list))
     for col, (ticker, score) in zip(cols, ranked):
         c = conviction.get(ticker, {})
         h_med = c.get("h_medium", 0.5)
@@ -262,10 +264,9 @@ with tab_signal:
             delta=hurst_label(h_med),
             delta_color="off",
         )
-
     st.divider()
 
-    # ── Score breakdown table ─────────────────────────────────────────────────
+    # Score breakdown table
     st.subheader("🧮 Score Breakdown")
     rows = []
     for ticker, score in ranked:
@@ -290,10 +291,9 @@ with tab_signal:
                      .format("{:.3f}", subset=["Total Score","MTF (40%)","Divergence (40%)","Sync (20%)","H Velocity",f"H ({MEDIUM_WINDOW}d)",f"H ({LONG_WINDOW}d)"]),
         use_container_width=True,
     )
-
     st.divider()
 
-    # ── Cross-asset sync gauge ────────────────────────────────────────────────
+    # Cross-asset sync gauge
     if show_sync:
         st.subheader("🔗 Cross-Asset Synchronisation")
         sync_level = sync.get("sync_level", 0.5)
@@ -306,7 +306,6 @@ with tab_signal:
             f"Sync level: **{sync_level:.2f}** — {sync_label} · "
             f"H_mean={sync.get('h_mean', 0):.3f} · H_std={sync.get('h_std', 0):.3f}"
         )
-
         fig_sync = go.Figure(go.Bar(
             x=list(sync.get("scores", {}).keys()),
             y=list(sync.get("scores", {}).values()),
@@ -322,15 +321,14 @@ with tab_signal:
             yaxis_title="Deviation from Cluster Mean H",
             title="ETF Hurst Deviation from Cross-Asset Mean (positive = above cluster)",
         )
-        st.plotly_chart(fig_sync, use_container_width=True, key="sync_chart")
+        st.plotly_chart(fig_sync, use_container_width=True, key=f"sync_chart_{option}")
+        st.divider()
 
-    st.divider()
-
-    # ── Signal history ────────────────────────────────────────────────────────
+    # Signal history
     st.subheader("📋 Signal History")
     if signals_df is not None and not signals_df.empty:
         display_cols = ["signal", "conviction", "label"] + \
-                       [f"{t}_total" for t in ETF_UNIVERSE if f"{t}_total" in signals_df.columns]
+                       [f"{t}_total" for t in etf_list if f"{t}_total" in signals_df.columns]
         available = [c for c in display_cols if c in signals_df.columns]
         st.dataframe(
             signals_df[available].tail(20).sort_index(ascending=False),
@@ -342,24 +340,20 @@ with tab_signal:
     fit_date = metadata.get("last_model_fit", "unknown")
     st.caption(f"Last pipeline run: **{fit_date}** · Data through: **{data_date}**")
 
+    st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — MTF ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_mtf:
+    # MTF analysis (heatmap, regime timeline, per-ETF history)
     st.subheader("📊 Multi-Timeframe Hurst Analysis")
     st.caption(
         f"H63 Velocity ({VELOCITY_WINDOW}d lookback) · **{MEDIUM_WINDOW}d** (~1q) · "
         f"**{LONG_WINDOW}d** (~6m) · Trending threshold H > {H_TRENDING}"
     )
 
-    # ── Heatmap: ETF × Timeframe ──────────────────────────────────────────────
+    # Heatmap: current values
     st.markdown("#### Current Hurst Heatmap — ETF × Timeframe")
     st.caption("H columns: Dark green = Strong Trend (>0.65) · Green = Mild Trend (>0.55) · Yellow-green = Weak Trend (0.50–0.55) · Amber = Random Walk · Red = Mean-Reverting")
 
-    # Build two separate heatmaps: velocity (col 0) and H values (cols 1-2)
-    # They have different scales and colour logic so must be rendered as subplots
-    tickers_ord = [t for t in ETF_UNIVERSE if t in conviction]
+    tickers_ord = [t for t in etf_list if t in conviction]
 
     vel_z, vel_t = [], []
     h_z,   h_t   = [], []
@@ -385,8 +379,6 @@ with tab_mtf:
         horizontal_spacing=0.02,
         shared_yaxes=True,
     )
-
-    # Velocity column — diverging scale centred on 0 (-0.5 to +0.5)
     fig_hm.add_trace(go.Heatmap(
         z=vel_z, x=["H63 Velocity"], y=tickers_ord,
         text=vel_t, texttemplate="%{text}",
@@ -401,8 +393,6 @@ with tab_mtf:
         zmin=-0.5, zmax=0.5,
         showscale=False,
     ), row=1, col=1)
-
-    # H value columns — standard H scale
     fig_hm.add_trace(go.Heatmap(
         z=h_z, x=[w[0] for w in h_windows], y=tickers_ord,
         text=h_t, texttemplate="%{text}",
@@ -419,7 +409,6 @@ with tab_mtf:
         showscale=True,
         colorbar=dict(title="H", thickness=12, len=0.8, x=1.01),
     ), row=1, col=2)
-
     fig_hm.update_layout(
         **CHART_LAYOUT, height=280,
         title=f"Hurst Heatmap — {ohlcv.index[-1].date()} | Velocity · {MEDIUM_WINDOW}d · {LONG_WINDOW}d",
@@ -428,20 +417,17 @@ with tab_mtf:
         yaxis=dict(autorange="reversed"),
     )
     st.caption("Velocity column: green = H63 accelerating ↑ · red = decelerating ↓ · scale: −0.5 to +0.5")
-    st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_chart")
-
+    st.plotly_chart(fig_hm, use_container_width=True, key=f"heatmap_chart_{option}")
     st.divider()
 
-    # ── Regime timeline ───────────────────────────────────────────────────────
+    # Regime timeline (if history available)
     if show_mtf_history and mtf_hist is not None and not mtf_hist.empty:
         st.markdown("#### Regime Timeline — Which ETF Was Trending (63d)")
         st.caption(
             "Each band shows the fraction of days per month each ETF had H > 0.55 "
             "on the 63d window. Taller band = more consistently trending that month."
         )
-
-        # Resample to monthly: fraction of days each ETF was trending
-        trend_cols = {t: f"{t}_h_medium" for t in ETF_UNIVERSE
+        trend_cols = {t: f"{t}_h_medium" for t in etf_list
                       if f"{t}_h_medium" in mtf_hist.columns}
         if trend_cols:
             trend_df = (mtf_hist[[c for c in trend_cols.values()]] > H_TRENDING).astype(float)
@@ -449,14 +435,14 @@ with tab_mtf:
             monthly  = trend_df.resample("ME").mean()
 
             fig_rt = go.Figure()
-            for ticker in ETF_UNIVERSE:
+            for ticker in etf_list:
                 if ticker not in monthly.columns:
                     continue
                 fig_rt.add_trace(go.Bar(
                     x=monthly.index,
                     y=monthly[ticker],
                     name=ticker,
-                    marker_color=etf_colour(ticker),
+                    marker_color=etf_colour(ticker, option),
                     hovertemplate="%{x|%b %Y}<br>" + ticker + ": %{y:.0%} trending days<extra></extra>",
                 ))
             fig_rt.update_layout(
@@ -467,13 +453,12 @@ with tab_mtf:
                 yaxis_range=[0, len(trend_cols)],
                 title="Monthly Trending Regime Share — 63d Hurst > 0.55",
             )
-            st.plotly_chart(fig_rt, use_container_width=True, key="regime_timeline")
+            st.plotly_chart(fig_rt, use_container_width=True, key=f"regime_timeline_{option}")
+            st.divider()
 
-        st.divider()
-
-        # ── Per-ETF H history: one focused ETF at a time ──────────────────────
+        # Per-ETF H history
         st.markdown("#### Per-ETF Hurst History")
-        selected_etf = st.selectbox("Select ETF", ETF_UNIVERSE, key="etf_selector")
+        selected_etf = st.selectbox("Select ETF", etf_list, key=f"etf_selector_{option}")
         cols_etf = {
             "21d":  f"{selected_etf}_h_short",
             "63d":  f"{selected_etf}_h_medium",
@@ -489,7 +474,7 @@ with tab_mtf:
             fig_etf.add_trace(go.Scatter(
                 x=mtf_hist.index, y=mtf_hist[col],
                 name=f"H {label}",
-                line=dict(color=etf_colour(selected_etf), **line_styles[label]),
+                line=dict(color=etf_colour(selected_etf, option), **line_styles[label]),
                 opacity=0.9 if label == "63d" else 0.5,
             ))
         fig_etf.add_hrect(y0=H_TRENDING, y1=0.9,
@@ -506,16 +491,13 @@ with tab_mtf:
             yaxis_range=[0.2, 0.95],
             title=f"{selected_etf} — Hurst History (Velocity · {MEDIUM_WINDOW}d · {LONG_WINDOW}d)",
         )
-        st.plotly_chart(fig_etf, use_container_width=True, key="per_etf_chart")
+        st.plotly_chart(fig_etf, use_container_width=True, key=f"per_etf_chart_{option}")
+        st.divider()
 
-    elif not show_mtf_history:
-        st.info("Enable 'Show MTF history chart' in the sidebar to view this section.")
     else:
         st.info("MTF history not yet available — pipeline must run first.")
 
-    st.divider()
-
-    # ── Divergence detail ─────────────────────────────────────────────────────
+    # Divergence detail
     st.markdown("#### Divergence Score Detail")
     st.caption(
         "**div_a** = H risen vs 6-month ago (momentum) · "
@@ -523,7 +505,7 @@ with tab_mtf:
         "**div_c** = recently crossed 1yr mean (fresh transition)"
     )
     div_rows = []
-    for ticker in ETF_UNIVERSE:
+    for ticker in etf_list:
         d = div_scores.get(ticker, {})
         c = conviction.get(ticker, {})
         div_rows.append({
@@ -546,11 +528,7 @@ with tab_mtf:
         use_container_width=True,
     )
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — WALK-FORWARD BACKTEST
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_wf:
+    # Walk-forward backtest
     st.subheader("📈 Walk-Forward Backtest")
     st.caption(
         "Proper OOS backtest: 252-day rolling train window, 21-day step-forward, "
@@ -559,9 +537,9 @@ with tab_wf:
 
     if wf_df is None or wf_df.empty:
         st.info("Walk-forward results not available yet — trigger the pipeline.")
-        st.stop()
+        return
 
-    # Handle both new format (cum_strategy) and old Hawkes format (cum_A)
+    # Handle column naming (cum_strategy for new, cum_A for old)
     if "cum_strategy" in wf_df.columns:
         cum_col = "cum_strategy"
         ret_col = "ret"
@@ -570,19 +548,20 @@ with tab_wf:
         ret_col = "ret_A"
     else:
         st.warning(f"Walk-forward columns not recognised: {wf_df.columns.tolist()} — re-run the pipeline.")
-        st.stop()
+        return
 
     metrics = compute_wf_metrics(wf_df)
     if not metrics:
         st.info("Walk-forward data format unrecognised — trigger a fresh pipeline run.")
-        st.stop()
+        return
 
-    # ── Benchmark metrics ─────────────────────────────────────────────────────
+    # Benchmark metrics
     bm_ann, bm_sharpe, bm_dd = 0.0, 0.0, 0.0
     has_bm = False
-    if benchmark != "None" and f"cum_{benchmark}" in wf_df.columns:
-        bm_r   = wf_df[f"ret_{benchmark}"].values
-        bm_c   = wf_df[f"cum_{benchmark}"].values
+    bench_choice = st.session_state.get("benchmark", "None")  # use global sidebar choice
+    if bench_choice != "None" and f"cum_{bench_choice}" in wf_df.columns:
+        bm_r   = wf_df[f"ret_{bench_choice}"].values
+        bm_c   = wf_df[f"cum_{bench_choice}"].values
         n_bm   = len(bm_r)
         bm_ann = float(bm_c[-1] ** (252/n_bm) - 1) if n_bm > 0 else 0.0
         bm_sharpe = float(np.mean(bm_r - 0.045/252) / (np.std(bm_r)+1e-9) * np.sqrt(252))
@@ -592,16 +571,16 @@ with tab_wf:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Ann. Return",  f"{metrics['ann_return']:+.1%}",
-              delta=f"{metrics['ann_return']-bm_ann:+.1%} vs {benchmark}" if has_bm else None)
+              delta=f"{metrics['ann_return']-bm_ann:+.1%} vs {bench_choice}" if has_bm else None)
     c2.metric("Sharpe",       f"{metrics['sharpe']:.2f}",
-              delta=f"{metrics['sharpe']-bm_sharpe:+.2f} vs {benchmark}" if has_bm else None)
+              delta=f"{metrics['sharpe']-bm_sharpe:+.2f} vs {bench_choice}" if has_bm else None)
     c3.metric("Max Drawdown", f"{metrics['max_dd']:.1%}",
-              delta=f"{metrics['max_dd']-bm_dd:+.1%} vs {benchmark}" if has_bm else None,
+              delta=f"{metrics['max_dd']-bm_dd:+.1%} vs {bench_choice}" if has_bm else None,
               delta_color="inverse")
     c4.metric("Hit Ratio",    f"{metrics['hit_ratio']:.1%}")
     c5.metric("OOS Days",     f"{metrics['n_days']:,}")
 
-    # ── Cumulative return chart ────────────────────────────────────────────────
+    # Cumulative return chart
     fig_wf = go.Figure()
     fig_wf.add_trace(go.Scatter(
         x=wf_df.index, y=wf_df[cum_col],
@@ -611,27 +590,27 @@ with tab_wf:
     ))
     if has_bm:
         fig_wf.add_trace(go.Scatter(
-            x=wf_df.index, y=wf_df[f"cum_{benchmark}"],
-            name=benchmark,
+            x=wf_df.index, y=wf_df[f"cum_{bench_choice}"],
+            name=bench_choice,
             line=dict(color="#94a3b8", width=1.5, dash="dot"),
         ))
     fig_wf.add_hline(y=1.0, line=dict(color="#e2e8f0", width=1))
     fig_wf.update_layout(
         **CHART_LAYOUT, height=440,
         yaxis_title="Cumulative Return (1 = start)",
-        title=f"HRC Strategy Walk-Forward OOS vs {benchmark} | Train=252d · Step=21d · 5bps fee",
+        title=f"HRC Strategy Walk-Forward OOS vs {bench_choice} | Train=252d · Step=21d · 5bps fee",
     )
-    st.plotly_chart(fig_wf, use_container_width=True, key="wf_main_chart")
+    st.plotly_chart(fig_wf, use_container_width=True, key=f"wf_main_chart_{option}")
 
-    # ── Signal distribution ───────────────────────────────────────────────────
-    st.divider()
+    # Signal distribution
     if "signal" in wf_df.columns:
+        st.divider()
         st.markdown("#### Historical Signal Distribution")
         sig_counts = wf_df["signal"].value_counts()
         fig_dist = go.Figure(go.Bar(
             x=sig_counts.index,
             y=sig_counts.values,
-            marker_color=[etf_colour(t) for t in sig_counts.index],
+            marker_color=[etf_colour(t, option) for t in sig_counts.index],
             text=sig_counts.values,
             textposition="outside",
         ))
@@ -640,7 +619,7 @@ with tab_wf:
             yaxis_title="Days Held",
             title="Days Each ETF Was the Top Signal (Walk-Forward OOS)",
         )
-        st.plotly_chart(fig_dist, use_container_width=True, key="sig_dist_chart")
+        st.plotly_chart(fig_dist, use_container_width=True, key=f"sig_dist_chart_{option}")
 
         st.markdown("#### Rolling 252-Day Annualised Return")
         roll_ret = wf_df[ret_col].rolling(252).apply(
@@ -655,12 +634,12 @@ with tab_wf:
             fillcolor="rgba(34,211,238,0.08)",
         ))
         if has_bm:
-            bm_roll = wf_df[f"ret_{benchmark}"].rolling(252).apply(
+            bm_roll = wf_df[f"ret_{bench_choice}"].rolling(252).apply(
                 lambda x: (np.prod(1 + x) ** (252/len(x)) - 1), raw=True
             )
             fig_roll.add_trace(go.Scatter(
                 x=wf_df.index, y=bm_roll,
-                name=benchmark,
+                name=bench_choice,
                 line=dict(color="#94a3b8", width=1.5, dash="dot"),
             ))
         fig_roll.add_hline(y=0, line=dict(color="#e2e8f0", width=1))
@@ -670,58 +649,12 @@ with tab_wf:
             yaxis_tickformat=".0%",
             title="Rolling 1-Year Annualised Return",
         )
-        st.plotly_chart(fig_roll, use_container_width=True, key="roll_ret_chart")
+        st.plotly_chart(fig_roll, use_container_width=True, key=f"roll_ret_chart_{option}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — ABOUT
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_about:
-    st.subheader("ℹ️ About P2-ETF-HURST")
-    st.markdown(f"""
-### Hurst Confluence (HRC) Signal Architecture
+# ── Render both tabs ──────────────────────────────────────────────────────────
+with tab_a:
+    render_option_tab('a', FI_UNIVERSE, "Fixed Income / Commodities")
 
-The signal conviction score per ETF is a weighted combination of three components:
-
-| Component | Weight | Logic |
-|-----------|--------|-------|
-| **MTF + Velocity** | {W_MTF:.0%} | H63 velocity (acceleration) + H63 level + H126 confirmation. Velocity boosts score when regime is accelerating |
-| **Hurst Divergence** | {W_DIV:.0%} | Blend of: (a) H risen vs 6m ago, (b) H above own 2yr baseline, (c) recently crossed 1yr mean |
-| **Cross-Asset Sync** | {W_SYNC:.0%} | Reward ETFs whose H diverges positively from the cluster mean |
-
-### Regime Thresholds
-
-| H Range | Regime |
-|---------|--------|
-| H ≥ 0.65 | Strong Trend |
-| 0.55 ≤ H < 0.65 | Mild Trend |
-| 0.45 ≤ H < 0.55 | Random Walk |
-| H < 0.45 | Mean-Reverting |
-
-### Walk-Forward Backtest Methodology
-
-- **Train window**: 252 trading days (~1 year)
-- **Step size**: 21 days (monthly rebalance)
-- **Signal**: Top ETF by HRC conviction score computed on train window
-- **Fee**: 5bps per rotation
-- **No look-ahead**: Each day's signal uses only data available up to that point
-
-### ETF Universe
-
-| Ticker | Name | Asset Class |
-|--------|------|-------------|
-| TLT | iShares 20yr Treasury | Long-duration Treasuries |
-| LQD | iShares IG Corp Bond | Investment Grade Bonds |
-| HYG | iShares High Yield Bond | High Yield Bonds |
-| VNQ | Vanguard Real Estate | US REITs |
-| GLD | SPDR Gold Shares | Gold |
-| SLV | iShares Silver Trust | Silver |
-
-### Data Sources
-- OHLCV: Yahoo Finance via `yfinance`
-- Stored on HuggingFace: `P2SAMAPA/p2-etf-hurst-data`
-- Pipeline runs daily after US market close (Mon–Fri)
-
----
-*For educational and research purposes only. Not financial advice.*
-    """)
+with tab_b:
+    render_option_tab('b', OPTION_B_ETFS, "Equity Sectors")
