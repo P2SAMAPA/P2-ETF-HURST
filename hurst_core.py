@@ -221,10 +221,9 @@ def compute_divergence_scores(
 ) -> dict:
     """
     3-part divergence score for each ETF.
+    If etf_list is not provided, use keys of mtf_today.
     """
     if etf_list is None:
-        etf_list = ETF_UNIVERGE   # fix typo? should be ETF_UNIVERSE
-        # Actually we should use the keys of mtf_today
         etf_list = list(mtf_today.keys())
 
     scores = {}
