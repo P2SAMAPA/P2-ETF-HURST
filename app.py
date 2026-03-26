@@ -38,7 +38,8 @@ try:
         compute_all_mtf, compute_divergence_scores,
         compute_sync_score, compute_conviction_scores,
         compute_momentum_scores, optimise_momentum_weights,
-        generate_signal, hurst_label, hurst_regime_colour,
+        generate_signal, build_mtf_history,
+        hurst_label, hurst_regime_colour,
         velocity_label, velocity_colour,
         conviction_label, W_MTF, W_DIV, W_SYNC,
         MEDIUM_WINDOW, LONG_WINDOW, VELOCITY_WINDOW,
@@ -216,12 +217,12 @@ def render_option_tab(option: str, etf_list: list, option_label: str):
     bm_ret     = returns_df[[t for t in BENCHMARKS if t in returns_df.columns]]
 
     # Compute today's signal from latest data
-    mtf_today  = compute_all_mtf(etf_ret)
-    div_scores = compute_divergence_scores(mtf_today, mtf_hist) if mtf_hist is not None else {}
-    sync       = compute_sync_score(mtf_today)
-    conviction = compute_conviction_scores(mtf_today, div_scores, sync)
-    mom_w, w3m = optimise_momentum_weights(etf_ret, conviction, train_window=252)
-    mom_scores = compute_momentum_scores(etf_ret, w3m=w3m)
+    mtf_today  = compute_all_mtf(etf_ret, etf_list=etf_list)
+    div_scores = compute_divergence_scores(mtf_today, mtf_hist, etf_list=etf_list) if mtf_hist is not None else {}
+    sync       = compute_sync_score(mtf_today, etf_list=etf_list)
+    conviction = compute_conviction_scores(mtf_today, div_scores, sync, etf_list=etf_list)
+    mom_w, w3m = optimise_momentum_weights(etf_ret, conviction, train_window=252, etf_list=etf_list)
+    mom_scores = compute_momentum_scores(etf_ret, w3m=w3m, etf_list=etf_list)
     signal     = generate_signal(conviction, mom_scores, mom_weight=mom_w, w3m=w3m)
 
     data_date  = ohlcv.index[-1].date()
