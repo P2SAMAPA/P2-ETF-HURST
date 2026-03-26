@@ -235,9 +235,12 @@ def compute_mtf_hurst(returns: pd.Series, date: Optional[pd.Timestamp] = None) -
     }
 
 
-def compute_all_mtf(returns_df: pd.DataFrame) -> dict:
+def compute_all_mtf(returns_df: pd.DataFrame, etf_list: Optional[list] = None) -> dict:
+    """Compute MTF Hurst for all ETFs in etf_list (or global ETF_UNIVERSE if None)."""
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
     results = {}
-    for ticker in ETF_UNIVERSE:
+    for ticker in etf_list:
         if ticker not in returns_df.columns:
             continue
         results[ticker] = compute_mtf_hurst(returns_df[ticker])
@@ -248,8 +251,10 @@ def compute_all_mtf(returns_df: pd.DataFrame) -> dict:
 # Rolling MTF history
 # =============================================================================
 
-def build_mtf_history(returns_df: pd.DataFrame, step: int = 5) -> pd.DataFrame:
-    """Build rolling DFA Hurst history for all ETFs (every `step` days)."""
+def build_mtf_history(returns_df: pd.DataFrame, step: int = 5, etf_list: Optional[list] = None) -> pd.DataFrame:
+    """Build rolling DFA Hurst history for all ETFs in etf_list (every `step` days)."""
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
     dates    = returns_df.index
     n        = len(dates)
     min_rows = LONG_WINDOW + 1
@@ -258,7 +263,7 @@ def build_mtf_history(returns_df: pd.DataFrame, step: int = 5) -> pd.DataFrame:
     for i in range(min_rows, n, step):
         row    = {"date": dates[i]}
         slice_ = returns_df.iloc[:i+1]
-        for ticker in ETF_UNIVERSE:
+        for ticker in etf_list:
             if ticker not in slice_.columns:
                 continue
             s = slice_[ticker].dropna()
@@ -281,17 +286,18 @@ def compute_divergence_scores(
     mtf_today:   dict,
     mtf_history: pd.DataFrame,
     lookback:    int = 504,
+    etf_list:    Optional[list] = None,
 ) -> dict:
     """
-    3-part divergence score per ETF:
-      (a) H risen most vs own 6m ago  (momentum of regime)
-      (b) H furthest above own 2yr baseline  (absolute persistence)
-      (c) H recently crossed above 1yr mean  (fresh transition)
+    3-part divergence score per ETF.
+    If etf_list is None, uses keys of mtf_today.
     """
+    if etf_list is None:
+        etf_list = list(mtf_today.keys()) if mtf_today else ETF_UNIVERSE
     scores = {}
 
     if mtf_history is None or mtf_history.empty:
-        for ticker in ETF_UNIVERSE:
+        for ticker in etf_list:
             if ticker not in mtf_today:
                 continue
             h = mtf_today[ticker]["h_medium"]
@@ -303,7 +309,7 @@ def compute_divergence_scores(
 
     hist = mtf_history.tail(lookback)
 
-    for ticker in ETF_UNIVERSE:
+    for ticker in etf_list:
         if ticker not in mtf_today:
             continue
         col_m  = f"{ticker}_h_medium"
@@ -346,10 +352,13 @@ def compute_divergence_scores(
 # Cross-asset sync
 # =============================================================================
 
-def compute_sync_score(mtf_today: dict) -> dict:
-    h_vals = {t: mtf_today[t]["h_medium"] for t in ETF_UNIVERSE if t in mtf_today}
+def compute_sync_score(mtf_today: dict, etf_list: Optional[list] = None) -> dict:
+    """Compute cross-asset sync scores for ETFs in etf_list."""
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
+    h_vals = {t: mtf_today[t]["h_medium"] for t in etf_list if t in mtf_today}
     if not h_vals:
-        return {"sync_level": 0.5, "h_mean": 0.5, "h_std": 0.0, "scores": {t: 0.0 for t in ETF_UNIVERSE}}
+        return {"sync_level": 0.5, "h_mean": 0.5, "h_std": 0.0, "scores": {t: 0.0 for t in etf_list}}
 
     arr        = np.array(list(h_vals.values()))
     h_mean     = float(np.mean(arr))
@@ -357,6 +366,10 @@ def compute_sync_score(mtf_today: dict) -> dict:
     sync_level = float(np.exp(-h_std / 0.05))
     max_dev    = float(np.max(np.abs(arr - h_mean))) + 1e-9
     dev_scores = {t: float((v - h_mean) / max_dev) for t, v in h_vals.items()}
+    # Fill missing ETFs with 0.0
+    for t in etf_list:
+        if t not in dev_scores:
+            dev_scores[t] = 0.0
 
     return {
         "sync_level": round(sync_level, 4),
@@ -373,15 +386,18 @@ def compute_sync_score(mtf_today: dict) -> dict:
 def compute_momentum_scores(
     returns_df: pd.DataFrame,
     w3m:        float = 0.5,
+    etf_list:   Optional[list] = None,
 ) -> dict:
     """
     Cross-sectional rank-based momentum scores per ETF.
     w3m: weight on 3m momentum (1-w3m = weight on 6m momentum).
     Returns dict: ticker -> normalised momentum score in [0, 1].
     """
-    etfs    = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
+    etfs    = [t for t in etf_list if t in returns_df.columns]
     if not etfs:
-        return {t: 0.5 for t in ETF_UNIVERSE}
+        return {t: 0.5 for t in etf_list}
     n       = len(returns_df)
 
     ret_3m = {}
@@ -395,6 +411,8 @@ def compute_momentum_scores(
     def rank_norm(d: dict) -> dict:
         vals   = list(d.values())
         tickers = list(d.keys())
+        if not vals:
+            return {t: 0.5 for t in tickers}
         ranks  = pd.Series(vals, index=tickers).rank(pct=True)
         return ranks.to_dict()
 
@@ -411,13 +429,16 @@ def optimise_momentum_weights(
     returns_df:   pd.DataFrame,
     hrc_scores:   dict,
     train_window: int = 252,
+    etf_list:     Optional[list] = None,
 ) -> tuple[float, float]:
     """
     Grid search over (mom_weight, w3m) to find the blend that maximised
     Sharpe on the trailing train_window in-sample.
     Returns (best_mom_weight, best_w3m).
     """
-    etfs  = [t for t in ETF_UNIVERSE if t in returns_df.columns]
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
+    etfs  = [t for t in etf_list if t in returns_df.columns]
     if not etfs:
         log.warning("optimise_momentum_weights: no ETF columns found, returning defaults")
         return 0.20, 0.50
@@ -434,7 +455,7 @@ def optimise_momentum_weights(
             for i in range(MOM_6M_WINDOW, len(hist) - 1):
                 sub = hist.iloc[:i]
                 # Quick HRC scores (use pre-computed mtf_scores from hrc_scores dict)
-                mom_scores = compute_momentum_scores(sub, w3m=w3m)
+                mom_scores = compute_momentum_scores(sub, w3m=w3m, etf_list=etfs)
                 blended = {}
                 for t in etfs:
                     hrc = hrc_scores.get(t, {}).get("total", 0.5)
@@ -471,11 +492,14 @@ def compute_conviction_scores(
     mtf_today:  dict,
     div_scores: dict,
     sync:       dict,
+    etf_list:   Optional[list] = None,
 ) -> dict:
+    if etf_list is None:
+        etf_list = ETF_UNIVERSE
     results  = {}
     sync_dev = sync.get("scores", {})
 
-    for ticker in ETF_UNIVERSE:
+    for ticker in etf_list:
         if ticker not in mtf_today:
             continue
 
