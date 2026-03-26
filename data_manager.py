@@ -192,6 +192,7 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
     if pd.Timestamp(start_new) > pd.Timestamp(today_str):
         log.info("Data already up to date.")
         return existing
+
     frames = []
     for ticker in ALL_TICKERS:
         df = fetch_ticker_ohlcv(ticker, start_new,
@@ -199,9 +200,26 @@ def incremental_update(existing: pd.DataFrame) -> pd.DataFrame:
         if df is not None:
             frames.append(df)
         time.sleep(random.uniform(0.5, 1.5))
+
     if not frames:
         return existing
-    new_df  = pd.concat(frames, axis=1)
+
+    new_df = pd.concat(frames, axis=1)
+
+    # Ensure new_df has the same column MultiIndex as existing
+    # (existing columns might have more tickers/fields; we align)
+    if isinstance(new_df.columns, pd.MultiIndex) and isinstance(existing.columns, pd.MultiIndex):
+        # Reindex columns to match existing's levels
+        # We need to keep all existing columns, filling missing with NaN
+        new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
+    elif not isinstance(new_df.columns, pd.MultiIndex) and not isinstance(existing.columns, pd.MultiIndex):
+        # Simple columns: just align
+        new_df = new_df.reindex(columns=existing.columns, fill_value=np.nan)
+    else:
+        # If structures differ, we should raise an error or force rebuild
+        log.error("Column structure mismatch – please reseed the dataset")
+        return existing
+
     updated = pd.concat([existing, new_df])
     return updated[~updated.index.duplicated(keep="last")].sort_index().ffill()
 
