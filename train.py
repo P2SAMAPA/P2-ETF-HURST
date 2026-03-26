@@ -111,18 +111,18 @@ def run_pipeline(option: str = "a", skip_hf_write: bool = False) -> dict:
 
     # ── Step 2: Multi-timeframe Hurst ─────────────────────────────────────────
     log.info("Step 2: Computing multi-timeframe Hurst...")
-    mtf_today = compute_all_mtf(etf_returns)
+    mtf_today = compute_all_mtf(etf_returns, etf_list=target_etfs)
     for ticker, mtf in mtf_today.items():
-        log.info(f"  {ticker}: H21={mtf['h_short']:.3f} H63={mtf['h_medium']:.3f} "
-                 f"H252={mtf['h_long']:.3f} trending={mtf['trending_count']}/3 "
+        log.info(f"  {ticker}: H63={mtf['h_medium']:.3f} H126={mtf['h_long']:.3f} "
+                 f"velocity={mtf['h_velocity']:.3f} trending={mtf['trending_count']}/2 "
                  f"mtf_score={mtf['mtf_score']:.3f}")
 
     # ── Step 3: Divergence scores ─────────────────────────────────────────────
     log.info("Step 3: Computing divergence scores...")
     log.info("  Building MTF history for divergence baseline (step=5)...")
-    mtf_history = build_mtf_history(etf_returns, step=5)
+    mtf_history = build_mtf_history(etf_returns, step=5, etf_list=target_etfs)
     log.info(f"  MTF history: {mtf_history.shape}")
-    div_scores  = compute_divergence_scores(mtf_today, mtf_history)
+    div_scores  = compute_divergence_scores(mtf_today, mtf_history, etf_list=target_etfs)
     for ticker, d in div_scores.items():
         log.info(f"  {ticker}: div_a={d['div_a']:.3f} div_b={d['div_b']:.3f} "
                  f"div_c={d['div_c']:.3f} total={d['div_score']:.3f} "
@@ -130,20 +130,22 @@ def run_pipeline(option: str = "a", skip_hf_write: bool = False) -> dict:
 
     # ── Step 4: Cross-asset sync ──────────────────────────────────────────────
     log.info("Step 4: Computing cross-asset synchronisation...")
-    sync = compute_sync_score(mtf_today)
+    sync = compute_sync_score(mtf_today, etf_list=target_etfs)
     log.info(f"  Sync level={sync['sync_level']:.3f} "
              f"H_mean={sync['h_mean']:.3f} H_std={sync['h_std']:.3f}")
 
     # ── Step 5: Conviction scores + signal ───────────────────────────────────
     log.info("Step 5: Generating conviction scores and signal...")
-    conviction = compute_conviction_scores(mtf_today, div_scores, sync)
+    conviction = compute_conviction_scores(mtf_today, div_scores, sync, etf_list=target_etfs)
 
     # Optimise momentum blend weights on last 252 days
     log.info("  Optimising momentum weights...")
-    mom_w, w3m = optimise_momentum_weights(etf_returns, conviction, train_window=252)
+    mom_w, w3m = optimise_momentum_weights(
+        etf_returns, conviction, train_window=252, etf_list=target_etfs
+    )
     log.info(f"  Optimised: mom_weight={mom_w:.2f} w3m={w3m:.2f}")
 
-    mom_scores = compute_momentum_scores(etf_returns, w3m=w3m)
+    mom_scores = compute_momentum_scores(etf_returns, w3m=w3m, etf_list=target_etfs)
     log.info(f"  Momentum scores: { {t: round(v,3) for t,v in mom_scores.items()} }")
 
     signal = generate_signal(conviction, mom_scores, mom_weight=mom_w, w3m=w3m)
