@@ -1,12 +1,14 @@
 """
-reseed.py — P2-ETF-HAWKES
-==========================
+reseed.py — P2-ETF-HURST
+=========================
 ONE-TIME script to build complete OHLCV dataset from 2008.
 Uses Yahoo Finance first, falls back to Stooq if YF fails.
 
-ETFs  : TLT, LQD, HYG, VNQ, GLD, SLV
-Benchmarks: SPY, AGG
-Output: ohlcv_data.parquet  → HF dataset P2SAMAPA/p2-etf-hawkes-data
+ETFs (Option A) : TLT, LQD, HYG, VNQ, GLD, SLV
+ETFs (Option B) : SPY, QQQ, XLK, XLF, XLE, XLV, XLI, XLY, XLP, XLU, GDX, XME
+Benchmarks      : SPY, AGG  (SPY already in Option B, but we keep both)
+
+Output: ohlcv_data.parquet  → HF dataset P2SAMAPA/p2-etf-hurst-data
 
 Run manually: python reseed.py
 """
@@ -20,19 +22,17 @@ import yfinance as yf
 from datetime import datetime
 from huggingface_hub import HfApi, CommitOperationAdd
 
+# Import config to get all tickers
+from config import ALL_TICKERS
+
 # ── Configuration ─────────────────────────────────────────────────────────────
-HF_DATASET_REPO = "P2SAMAPA/p2-etf-hawkes-data"
-ETF_UNIVERSE    = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
-BENCHMARKS      = ["SPY", "AGG"]
-ALL_TICKERS     = ETF_UNIVERSE + BENCHMARKS
+HF_DATASET_REPO = "P2SAMAPA/p2-etf-hurst-data"   # updated
 START_DATE      = "2008-01-01"
 END_DATE        = datetime.today().strftime("%Y-%m-%d")
 OHLCV_FIELDS    = ["Open", "High", "Low", "Close", "Volume"]
 
-# NOTE: No custom requests.Session — new yfinance manages its own curl_cffi session.
 
-
-# ── Fetch helpers ─────────────────────────────────────────────────────────────
+# ── Fetch helpers (unchanged) ─────────────────────────────────────────────────
 
 def fetch_ohlcv_yf(ticker: str, start: str, end: str) -> pd.DataFrame | None:
     """Fetch full OHLCV from Yahoo Finance with exponential backoff."""
@@ -129,7 +129,7 @@ def fetch_ticker(ticker: str, start: str, end: str) -> pd.DataFrame | None:
 
 def main():
     print("=" * 60)
-    print("P2-ETF-HAWKES — Full OHLCV Reseed from 2008")
+    print("P2-ETF-HURST — Full OHLCV Reseed from 2008")
     print(f"Tickers : {ALL_TICKERS}")
     print(f"Range   : {START_DATE} → {END_DATE}")
     print("=" * 60)
