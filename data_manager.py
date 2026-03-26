@@ -17,7 +17,18 @@ log = logging.getLogger(__name__)
 HF_DATASET_REPO = "P2SAMAPA/p2-etf-hurst-data"
 ETF_UNIVERSE    = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
 BENCHMARKS      = ["SPY", "AGG"]
-ALL_TICKERS     = ETF_UNIVERSE + BENCHMARKS
+
+# For backward compatibility, we keep ETF_UNIVERSE unchanged.
+# We now fetch data for all ETFs (both FI and Equity) + benchmarks.
+# Import the new config file to get the equity list, but only for building ALL_TICKERS.
+# This import does not affect existing code because it's only used to define ALL_TICKERS.
+try:
+    from config import OPTION_B_ETFS
+except ImportError:
+    # Fallback if config.py is not yet created (for older runs)
+    OPTION_B_ETFS = []
+
+ALL_TICKERS = ETF_UNIVERSE + OPTION_B_ETFS + BENCHMARKS
 
 
 def _hf_token() -> str:
@@ -220,3 +231,55 @@ def save_to_hf(files: dict, commit_message: str = "Daily update") -> bool:
     except Exception as e:
         log.error(f"HF save failed: {e}")
         return False
+
+
+# ==============================================================================
+# NEW: Option-aware functions (for Equity module)
+# ==============================================================================
+
+def _option_filename(option: str, basename: str) -> str:
+    """Generate filename for a given option and base name."""
+    # option: 'a' or 'b'
+    return f"{basename}_{option}.parquet"
+
+
+def load_signals(option: str) -> pd.DataFrame | None:
+    """
+    Load signals for a given option.
+    Option 'a' -> signals_latest_a.parquet
+    Option 'b' -> signals_latest_b.parquet
+    """
+    return _load_parquet(_option_filename(option, "signals_latest"))
+
+
+def save_signals(df: pd.DataFrame, option: str) -> bool:
+    """Save signals for a given option."""
+    files = {_option_filename(option, "signals_latest"): df}
+    return save_to_hf(files, commit_message=f"Update signals option {option}")
+
+
+def load_walkforward(option: str) -> pd.DataFrame | None:
+    return _load_parquet(_option_filename(option, "walkforward_returns"))
+
+
+def save_walkforward(df: pd.DataFrame, option: str) -> bool:
+    files = {_option_filename(option, "walkforward_returns"): df}
+    return save_to_hf(files, commit_message=f"Update walkforward returns option {option}")
+
+
+def load_mtf_history(option: str) -> pd.DataFrame | None:
+    return _load_parquet(_option_filename(option, "mtf_history"))
+
+
+def save_mtf_history(df: pd.DataFrame, option: str) -> bool:
+    files = {_option_filename(option, "mtf_history"): df}
+    return save_to_hf(files, commit_message=f"Update MTF history option {option}")
+
+
+def load_metadata(option: str) -> dict | None:
+    return _load_json(_option_filename(option, "metadata"))
+
+
+def save_metadata(data: dict, option: str) -> bool:
+    files = {_option_filename(option, "metadata"): data}
+    return save_to_hf(files, commit_message=f"Update metadata option {option}")
