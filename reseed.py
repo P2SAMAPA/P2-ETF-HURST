@@ -5,7 +5,7 @@ ONE-TIME script to build complete OHLCV dataset from 2008.
 Uses Yahoo Finance first, falls back to Stooq if YF fails.
 
 ETFs (Option A) : TLT, LQD, HYG, VNQ, GLD, SLV
-ETFs (Option B) : SPY, QQQ, XLK, XLF, XLE, XLV, XLI, XLY, XLP, XLU, GDX, XME
+ETFs (Option B) : SPY, QQQ, XLK, XLF, XLE, XLV, XLI, XLY, XLP, XLU, GDX, XME, XLB, XLRE
 Benchmarks      : SPY, AGG  (SPY already in Option B, but we keep both)
 
 Output: ohlcv_data.parquet  → HF dataset P2SAMAPA/p2-etf-hurst-data
