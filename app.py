@@ -891,7 +891,7 @@ def _render_mfdfa_tab(option: str, etf_list: list):
         st.dataframe(
             table_df.style
             .highlight_max(subset=["MFDFA Score"], color="#d1fae5")
-            -map(_colour_width, subset=["Width label"])
+            .map(_colour_width, subset=["Width label"])
             .format({
                 "MFDFA Score": "{:.4f}",
                 "H_mono":      "{:.3f}",
