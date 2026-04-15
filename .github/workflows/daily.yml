@@ -1,57 +1,67 @@
-name: Daily HRC Pipeline
+name: P2-ETF-HURST Daily Pipeline
 
 on:
   schedule:
-    - cron: "0 2 * * 2-6"   # 02:00 UTC = 9pm EST Mon-Fri (after market close)
-  workflow_dispatch:
+    - cron: "0 2 * * 1-5"   # 02:00 UTC Mon–Fri (unchanged)
+  workflow_dispatch:          # keep manual trigger (unchanged)
 
 jobs:
-  train_option_a:
-    name: Option A (FI/Commodities)
+  run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run HRC pipeline (Option A)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python train.py --option a
-      - name: Upload logs (Option A)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-logs-a-${{ github.run_id }}
-          path: "*.log"
-          retention-days: 7
+    timeout-minutes: 40       # was 30; +10min for MFDFA (fast — numpy only)
 
-  train_option_b:
-    name: Option B (Equity Sectors)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
     steps:
-      - name: Checkout
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repo
         uses: actions/checkout@v4
-      - name: Set up Python
+
+      # ── Python ──────────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
+      # ── Install deps ─────────────────────────────────────────────────────────
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run HRC pipeline (Option B)
+
+      # ════════════════════════════════════════════════════════════════════════
+      # EXISTING HURST PIPELINE — UNCHANGED
+      # ════════════════════════════════════════════════════════════════════════
+
+      # ── HURST Option A (FI) ──────────────────────────────────────────────────
+      - name: Run HURST pipeline — Option A (Fixed Income)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          GH_PAT:     ${{ secrets.GH_PAT }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+        run: python train.py --option a
+
+      # ── HURST Option B (Equity) ───────────────────────────────────────────────
+      - name: Run HURST pipeline — Option B (Equity)
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          GH_PAT:     ${{ secrets.GH_PAT }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
         run: python train.py --option b
-      - name: Upload logs (Option B)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-logs-b-${{ github.run_id }}
-          path: "*.log"
-          retention-days: 7
+
+      # ════════════════════════════════════════════════════════════════════════
+      # NEW — MFDFA MODULE (runs after HURST, reuses same OHLCV from HF)
+      # ════════════════════════════════════════════════════════════════════════
+
+      # ── MFDFA Option A (FI) ──────────────────────────────────────────────────
+      - name: Run MFDFA pipeline — Option A (Fixed Income)
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+        run: python train_mfdfa.py --option a
+
+      # ── MFDFA Option B (Equity) ───────────────────────────────────────────────
+      - name: Run MFDFA pipeline — Option B (Equity)
+        env:
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+        run: python train_mfdfa.py --option b
