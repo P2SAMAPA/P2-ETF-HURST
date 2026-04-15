@@ -188,7 +188,7 @@ st.caption(
     "Regime Divergence · Cross-Asset Synchronisation"
 )
 
-#   tab_a, tab_b, tab_mfdfa_a, tab_mfdfa_b = st.tabs([
+tab_a, tab_b, tab_mfdfa_a, tab_mfdfa_b = st.tabs([
        "🌊 Option A — Fixed Income / Commodities",
        "📈 Option B — Equity Sectors",
        "🔬 MFDFA — Fixed Income",
