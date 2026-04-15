@@ -188,12 +188,12 @@ st.caption(
     "Regime Divergence · Cross-Asset Synchronisation"
 )
 
-# Create two tabs: Option A (FI) and Option B (Equity)
-tab_a, tab_b = st.tabs([
-    "🌊 Option A — Fixed Income / Commodities",
-    "📈 Option B — Equity Sectors",
-])
-
+#   tab_a, tab_b, tab_mfdfa_a, tab_mfdfa_b = st.tabs([
+       "🌊 Option A — Fixed Income / Commodities",
+       "📈 Option B — Equity Sectors",
+       "🔬 MFDFA — Fixed Income",
+       "🔬 MFDFA — Equity",
+   ])
 # ------------------------------------------------------------------------------
 # Helper function to render a complete option tab
 def render_option_tab(option: str, etf_list: list, option_label: str):
@@ -659,3 +659,489 @@ with tab_a:
 
 with tab_b:
     render_option_tab('b', OPTION_B_ETFS, "Equity Sectors")
+
+# ── MFDFA helpers ────────────────────────────────────────────────────────────
+ 
+import json as _json
+import os as _os
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+ 
+try:
+    from mfdfa_core import compute_all_mfdfa, generate_mfdfa_signal, MFDFA_Q_VALUES
+    _MFDFA_AVAILABLE = True
+except ImportError:
+    _MFDFA_AVAILABLE = False
+ 
+ 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mfdfa_signals_cached(option: str):
+    """Load mfdfa_signals_{option}.parquet from HuggingFace."""
+    try:
+        from huggingface_hub import hf_hub_download
+        token   = _os.environ.get("HF_TOKEN")
+        repo_id = _os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-hurst-data")
+        path    = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"mfdfa_signals_{option}.parquet",
+            repo_type="dataset",
+            token=token,
+        )
+        df = pd.read_parquet(path)
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return None
+ 
+ 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mfdfa_history_cached(option: str):
+    """Load mfdfa_history_{option}.parquet from HuggingFace."""
+    try:
+        from huggingface_hub import hf_hub_download
+        token   = _os.environ.get("HF_TOKEN")
+        repo_id = _os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-hurst-data")
+        path    = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"mfdfa_history_{option}.parquet",
+            repo_type="dataset",
+            token=token,
+        )
+        df = pd.read_parquet(path)
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return None
+ 
+ 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mfdfa_metadata_cached(option: str):
+    try:
+        from huggingface_hub import hf_hub_download
+        token   = _os.environ.get("HF_TOKEN")
+        repo_id = _os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-hurst-data")
+        path    = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"mfdfa_metadata_{option}.json",
+            repo_type="dataset",
+            token=token,
+        )
+        with open(path) as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+ 
+ 
+def _width_colour(label: str) -> str:
+    return {
+        "STRONG":        "#22c55e",
+        "MODERATE":      "#3b82f6",
+        "WEAK":          "#f59e0b",
+        "MONOFRACTAL":   "#94a3b8",
+        "INSUFFICIENT_DATA": "#ef4444",
+        "ERROR":         "#ef4444",
+    }.get(label, "#94a3b8")
+ 
+ 
+def _render_mfdfa_tab(option: str, etf_list: list):
+    """
+    Render a complete MFDFA tab.  Reads pre-computed HF outputs when available,
+    falls back to live computation from today's OHLCV if not.
+    """
+    if not _MFDFA_AVAILABLE:
+        st.error(
+            "❌ `mfdfa_core.py` not found. Add it to the repo root and redeploy."
+        )
+        return
+ 
+    label = "Fixed Income / Commodities" if option == "a" else "Equity Sectors"
+    st.caption(
+        f"**Multifractal DFA** — {label} · ETFs: {' · '.join(etf_list)}"
+    )
+    st.markdown(
+        "> **What is MFDFA?**  "
+        "Standard DFA gives a single Hurst exponent H (linear scaling).  "
+        "MFDFA generalises this to a *spectrum* of exponents h(q) across "
+        "moment orders q ∈ {−4 … +4}.  "
+        "The **width Δα** of the resulting multifractal spectrum measures "
+        "how many distinct scaling regimes exist in the return series.  "
+        "A wide spectrum → complex, regime-rich dynamics.  "
+        "A narrow spectrum → near-monofractal, simpler persistence."
+    )
+    st.divider()
+ 
+    # ── Load pre-computed results ─────────────────────────────────────────────
+    mfdfa_signals = _load_mfdfa_signals_cached(option)
+    mfdfa_history = _load_mfdfa_history_cached(option)
+    mfdfa_meta    = _load_mfdfa_metadata_cached(option)
+ 
+    # ── Fall back to live computation if HF files not yet populated ──────────
+    live_results = None
+    if mfdfa_signals is None:
+        st.info(
+            "ℹ️ MFDFA pipeline hasn't run yet — computing live from today's OHLCV "
+            "(this happens once per session until the cron job runs)."
+        )
+        with st.spinner("Running MFDFA on today's data…"):
+            try:
+                ohlcv      = cached_load_ohlcv()
+                returns_df = get_returns(ohlcv)
+                etf_ret    = returns_df[
+                    [t for t in etf_list if t in returns_df.columns]
+                ]
+                live_results = compute_all_mfdfa(
+                    etf_ret, etf_list=etf_ret.columns.tolist()
+                )
+                signal = generate_mfdfa_signal(
+                    live_results, etf_list=etf_ret.columns.tolist()
+                )
+            except Exception as e:
+                st.error(f"Live MFDFA computation failed: {e}")
+                return
+    else:
+        # Pull today's result from saved signals
+        latest = mfdfa_signals.iloc[-1]
+        signal = {
+            "signal":     latest.get("signal", "—"),
+            "conviction": latest.get("conviction", 0.0),
+            "label":      latest.get("label", "—"),
+            "ranked":     [
+                (t, latest.get(f"{t}_conviction", 0.0))
+                for t in etf_list
+                if f"{t}_conviction" in latest
+            ],
+        }
+        signal["ranked"].sort(key=lambda x: x[1], reverse=True)
+ 
+    # ── Hero ─────────────────────────────────────────────────────────────────
+    top_etf    = signal.get("signal", "—")
+    conv_label = signal.get("label", "—")
+    conv_score = signal.get("conviction", 0.0)
+    last_run   = mfdfa_meta.get("last_run", "not yet run")
+ 
+    conv_col = (
+        "#22c55e" if conv_label == "STRONG"
+        else "#3b82f6" if conv_label == "MODERATE"
+        else "#f59e0b"
+    )
+ 
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-radius:16px;
+                padding:28px 36px;margin-bottom:20px;border-left:5px solid {conv_col};color:white">
+      <div style="font-size:.75rem;letter-spacing:.15em;text-transform:uppercase;
+                  color:#94a3b8;margin-bottom:4px">MFDFA Signal — {label}</div>
+      <div style="font-size:4rem;line-height:1;color:{conv_col};
+                  font-family:'DM Serif Display',serif">{top_etf}</div>
+      <div style="font-size:.9rem;color:#cbd5e1;margin-top:10px">
+        Conviction: <strong style="color:{conv_col}">{conv_label}</strong>
+        &nbsp;·&nbsp; Score: {conv_score:.3f}
+        &nbsp;·&nbsp; Last run: {last_run}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+ 
+    # ── Per-ETF scalar table ──────────────────────────────────────────────────
+    st.subheader("📊 Multifractal Metrics — All ETFs")
+    st.caption(
+        "**H_mono** = h(2), the standard monofractal Hurst from MFDFA (cross-check against HURST engine).  "
+        "**Δα** = multifractal spectrum width — higher = richer scaling structure.  "
+        "**Δf** = spectrum asymmetry — positive = more large positive fluctuations.  "
+        "**Width** = qualitative label."
+    )
+ 
+    rows = []
+    ranked_etfs = [r[0] for r in signal.get("ranked", [])]
+    etfs_ordered = ranked_etfs + [t for t in etf_list if t not in ranked_etfs]
+ 
+    for ticker in etfs_ordered:
+        if mfdfa_signals is not None and ticker in mfdfa_signals.columns.str.extract(r'^(\w+)_H_mono$', expand=False).dropna().values:
+            latest = mfdfa_signals.iloc[-1]
+            h    = latest.get(f"{ticker}_H_mono", float("nan"))
+            da   = latest.get(f"{ticker}_delta_alpha", float("nan"))
+            df_  = latest.get(f"{ticker}_delta_f", float("nan"))
+            lbl  = latest.get(f"{ticker}_width_label", "?")
+            conv = latest.get(f"{ticker}_conviction", 0.0)
+        elif live_results and ticker in live_results:
+            r    = live_results[ticker]
+            h    = r.get("H_mono", float("nan"))
+            da   = r.get("delta_alpha", float("nan"))
+            df_  = r.get("delta_f", float("nan"))
+            lbl  = r.get("width_label", "?")
+            from mfdfa_core import mfdfa_conviction_score
+            conv = mfdfa_conviction_score(r)
+        else:
+            continue
+ 
+        rows.append({
+            "ETF":          ticker,
+            "MFDFA Score":  round(conv, 4),
+            "H_mono":       round(h, 3)  if not (h != h) else float("nan"),
+            "Δα (width)":   round(da, 3) if not (da != da) else float("nan"),
+            "Δf (asym)":    round(df_, 3) if not (df_ != df_) else float("nan"),
+            "Width label":  lbl,
+        })
+ 
+    if rows:
+        table_df = pd.DataFrame(rows).set_index("ETF")
+ 
+        def _colour_width(val):
+            return f"color: {_width_colour(val)}; font-weight:600"
+ 
+        st.dataframe(
+            table_df.style
+            .highlight_max(subset=["MFDFA Score"], color="#d1fae5")
+            .applymap(_colour_width, subset=["Width label"])
+            .format({
+                "MFDFA Score": "{:.4f}",
+                "H_mono":      "{:.3f}",
+                "Δα (width)":  "{:.3f}",
+                "Δf (asym)":   "{:.3f}",
+            }, na_rep="—"),
+            use_container_width=True,
+        )
+ 
+    st.divider()
+ 
+    # ── Multifractal spectrum chart for selected ETF ──────────────────────────
+    st.subheader("🔬 Multifractal Spectrum — f(α) vs α")
+    st.caption(
+        "The wider the parabola, the richer the multifractal structure.  "
+        "A single dot collapses to monofractal (Brownian motion).  "
+        "This is computed live from the last 252 trading days."
+    )
+ 
+    spec_etf = st.selectbox(
+        "Select ETF for spectrum plot", etf_list,
+        key=f"mfdfa_spec_sel_{option}"
+    )
+ 
+    # Always recompute spectrum for the selected ETF from OHLCV
+    try:
+        ohlcv_data = cached_load_ohlcv()
+        ret_all    = get_returns(ohlcv_data)
+        if spec_etf in ret_all.columns:
+            from mfdfa_core import compute_mfdfa
+            arr_spec = ret_all[spec_etf].dropna().values[-252:]
+            res_spec = compute_mfdfa(arr_spec)
+ 
+            if res_spec["valid"]:
+                alpha_v   = res_spec["alpha"]
+                f_alpha_v = res_spec["f_alpha"]
+                h_q_v     = res_spec["h_q"]
+                q_vals    = res_spec["q_values"]
+ 
+                valid_mask = np.isfinite(alpha_v) & np.isfinite(f_alpha_v)
+                alpha_v   = alpha_v[valid_mask]
+                f_alpha_v = f_alpha_v[valid_mask]
+                q_q       = q_vals[valid_mask]
+ 
+                # Colour by q: negative q → large fluctuations (red), positive → small (blue)
+                col_norm = (q_q - q_q.min()) / (q_q.max() - q_q.min() + 1e-9)
+                colours  = [
+                    f"rgb({int(255*(1-c))},{int(80)},{int(255*c)})"
+                    for c in col_norm
+                ]
+ 
+                fig_spec = go.Figure()
+                fig_spec.add_trace(go.Scatter(
+                    x=alpha_v, y=f_alpha_v,
+                    mode="lines+markers",
+                    marker=dict(color=colours, size=9, line=dict(width=0.5, color="#334155")),
+                    line=dict(color="#94a3b8", width=1.5),
+                    name="f(α) spectrum",
+                    hovertemplate="α=%{x:.3f}<br>f(α)=%{y:.3f}<extra></extra>",
+                ))
+ 
+                # Annotate width
+                da_val = res_spec.get("delta_alpha", float("nan"))
+                lbl_v  = res_spec.get("width_label", "?")
+                if not (da_val != da_val):  # not NaN
+                    fig_spec.add_annotation(
+                        x=(alpha_v.min() + alpha_v.max()) / 2,
+                        y=f_alpha_v.min() - 0.05,
+                        text=f"Δα = {da_val:.3f} ({lbl_v})",
+                        showarrow=False,
+                        font=dict(size=13, color=_width_colour(lbl_v)),
+                    )
+ 
+                fig_spec.update_layout(
+                    **CHART_LAYOUT,
+                    height=380,
+                    xaxis_title="Singularity strength α",
+                    yaxis_title="Spectrum f(α)",
+                    title=(
+                        f"{spec_etf} — Multifractal Spectrum f(α) vs α  "
+                        f"| H_mono={res_spec['H_mono']:.3f}  Δα={da_val:.3f}  [{lbl_v}]"
+                        if not (da_val != da_val) else f"{spec_etf} — Multifractal Spectrum"
+                    ),
+                )
+                st.plotly_chart(fig_spec, use_container_width=True,
+                                key=f"mfdfa_spec_{option}_{spec_etf}")
+ 
+                # h(q) chart beneath it
+                st.markdown("#### Generalised Hurst h(q) vs q")
+                st.caption(
+                    "If h(q) is flat across q, the series is monofractal.  "
+                    "A downward slope from left to right indicates multifractality — "
+                    "large fluctuations (q<0) have different scaling than small ones (q>0)."
+                )
+                fig_hq = go.Figure()
+                valid_hq = np.isfinite(h_q_v)
+                fig_hq.add_trace(go.Scatter(
+                    x=q_vals[valid_hq], y=h_q_v[valid_hq],
+                    mode="lines+markers",
+                    line=dict(color="#22d3ee", width=2),
+                    marker=dict(size=7),
+                    name="h(q)",
+                ))
+                fig_hq.add_hline(
+                    y=res_spec["H_mono"], line=dict(color="#94a3b8", dash="dash", width=1),
+                    annotation_text=f"h(2) = {res_spec['H_mono']:.3f}",
+                    annotation_position="right",
+                )
+                fig_hq.add_hline(y=0.5, line=dict(color="#dc2626", dash="dot", width=1))
+                fig_hq.update_layout(
+                    **CHART_LAYOUT, height=280,
+                    xaxis_title="q",
+                    yaxis_title="h(q)",
+                    title=f"{spec_etf} — Generalised Hurst Exponents h(q)",
+                )
+                st.plotly_chart(fig_hq, use_container_width=True,
+                                key=f"mfdfa_hq_{option}_{spec_etf}")
+            else:
+                st.warning(f"MFDFA result invalid for {spec_etf} — likely insufficient history.")
+        else:
+            st.warning(f"{spec_etf} not available in return data.")
+    except Exception as ex:
+        st.error(f"Spectrum plot error: {ex}")
+ 
+    st.divider()
+ 
+    # ── Historical Δα trend ───────────────────────────────────────────────────
+    if mfdfa_history is not None and not mfdfa_history.empty:
+        st.subheader("📈 Historical Δα — Multifractal Width Over Time")
+        st.caption(
+            "Rising Δα → the series is becoming more multifractal (regime complexity increasing).  "
+            "Falling Δα → converging toward monofractal (simpler, more persistent dynamics)."
+        )
+ 
+        trend_etf = st.selectbox(
+            "ETF for Δα history", etf_list,
+            key=f"mfdfa_hist_sel_{option}"
+        )
+ 
+        col_da   = f"{trend_etf}_delta_alpha"
+        col_h    = f"{trend_etf}_H_mono"
+        col_df   = f"{trend_etf}_delta_f"
+ 
+        fig_hist = go.Figure()
+ 
+        if col_da in mfdfa_history.columns:
+            fig_hist.add_trace(go.Scatter(
+                x=mfdfa_history.index, y=mfdfa_history[col_da],
+                name="Δα (width)",
+                line=dict(color="#3b82f6", width=2),
+                fill="tozeroy", fillcolor="rgba(59,130,246,0.06)",
+            ))
+            fig_hist.add_hrect(
+                y0=0.40, y1=mfdfa_history[col_da].max() + 0.1,
+                fillcolor="#22c55e", opacity=0.04, line_width=0,
+                annotation_text="Strong multifractal (Δα≥0.40)",
+                annotation_position="top right",
+            )
+            fig_hist.add_hrect(
+                y0=0.0, y1=0.10,
+                fillcolor="#ef4444", opacity=0.04, line_width=0,
+                annotation_text="Near-monofractal",
+                annotation_position="bottom right",
+            )
+ 
+        if col_h in mfdfa_history.columns:
+            fig_hist.add_trace(go.Scatter(
+                x=mfdfa_history.index, y=mfdfa_history[col_h],
+                name="H_mono",
+                line=dict(color="#f59e0b", width=1.5, dash="dash"),
+                yaxis="y2",
+                opacity=0.7,
+            ))
+ 
+        fig_hist.update_layout(
+            **CHART_LAYOUT,
+            height=360,
+            title=f"{trend_etf} — Multifractal Width Δα history",
+            yaxis=dict(title="Δα (width)", range=[0, max(0.8, 1.0)]),
+            yaxis2=dict(
+                title="H_mono", overlaying="y", side="right",
+                range=[0.2, 0.9], showgrid=False,
+            ),
+        )
+        st.plotly_chart(fig_hist, use_container_width=True,
+                        key=f"mfdfa_hist_{option}_{trend_etf}")
+ 
+        st.divider()
+ 
+        # Cross-ETF Δα bar chart (latest snapshot)
+        st.markdown("#### Cross-ETF Δα Snapshot — Latest")
+        latest_da = {}
+        for t in etf_list:
+            col = f"{t}_delta_alpha"
+            if col in mfdfa_history.columns:
+                v = mfdfa_history[col].dropna()
+                if not v.empty:
+                    latest_da[t] = float(v.iloc[-1])
+ 
+        if latest_da:
+            sorted_da = sorted(latest_da.items(), key=lambda x: x[1], reverse=True)
+            fig_bar = go.Figure(go.Bar(
+                x=[r[0] for r in sorted_da],
+                y=[r[1] for r in sorted_da],
+                marker_color=[
+                    "#22c55e" if v >= 0.40
+                    else "#3b82f6" if v >= 0.20
+                    else "#f59e0b" if v >= 0.10
+                    else "#94a3b8"
+                    for _, v in sorted_da
+                ],
+                text=[f"{v:.3f}" for _, v in sorted_da],
+                textposition="outside",
+            ))
+            fig_bar.add_hline(y=0.40, line=dict(color="#22c55e", dash="dash", width=1),
+                              annotation_text="Strong", annotation_position="right")
+            fig_bar.add_hline(y=0.20, line=dict(color="#3b82f6", dash="dash", width=1),
+                              annotation_text="Moderate", annotation_position="right")
+            fig_bar.add_hline(y=0.10, line=dict(color="#f59e0b", dash="dash", width=1),
+                              annotation_text="Weak", annotation_position="right")
+            fig_bar.update_layout(
+                **CHART_LAYOUT, height=300,
+                yaxis_title="Δα (multifractal width)",
+                title="Cross-ETF Multifractal Width Δα — Latest (252d rolling)",
+            )
+            st.plotly_chart(fig_bar, use_container_width=True,
+                            key=f"mfdfa_crossbar_{option}")
+ 
+    # ── Signal history table ──────────────────────────────────────────────────
+    if mfdfa_signals is not None and not mfdfa_signals.empty:
+        st.divider()
+        st.subheader("📋 MFDFA Signal History")
+        display_cols = ["signal", "conviction", "label"] + [
+            f"{t}_H_mono" for t in etf_list if f"{t}_H_mono" in mfdfa_signals.columns
+        ] + [
+            f"{t}_delta_alpha" for t in etf_list if f"{t}_delta_alpha" in mfdfa_signals.columns
+        ]
+        available = [c for c in display_cols if c in mfdfa_signals.columns]
+        st.dataframe(
+            mfdfa_signals[available].tail(20).sort_index(ascending=False),
+            use_container_width=True,
+        )
+ 
+ 
+# ── Render MFDFA tabs ─────────────────────────────────────────────────────────
+# These lines go at the END of app.py, after the existing `with tab_b:` block.
+ 
+with tab_mfdfa_a:
+    _render_mfdfa_tab("a", FI_UNIVERSE)
+ 
+with tab_mfdfa_b:
+    _render_mfdfa_tab("b", OPTION_B_ETFS)
+ 
