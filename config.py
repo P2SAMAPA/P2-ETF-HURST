@@ -1,7 +1,7 @@
 # config.py — ETF universes and shared parameters
 
 # Option A: Fixed Income / Commodities (existing)
-OPTION_A_ETFS = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
+OPTION_A_ETFS = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV", "MBB", "PFF", "VCIT"]
 
 # Option B: Equity Sectors (new)
 OPTION_B_ETFS = [
