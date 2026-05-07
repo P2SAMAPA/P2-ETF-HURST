@@ -6,7 +6,7 @@ OPTION_A_ETFS = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV", "MBB", "PFF", "VCIT"]
 # Option B: Equity Sectors (new)
 OPTION_B_ETFS = [
     "SPY", "QQQ", "XLK", "XLF", "XLE", "XLV",
-    "XLI", "XLY", "XLP", "XLU", "GDX", "XLB", "XLRE", "XME", "IWF", "IWM", "XBI", "XSD", "XAR"
+    "XLI", "XLY", "XLP", "XLU", "GDX", "XLB", "XLRE", "XME", "IWF", "IWM", "IWD", "IWO", "XBI", "XSD", "XAR"
 ]
 
 # Combined list for data fetching (all tickers)
