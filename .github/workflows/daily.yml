@@ -2,7 +2,7 @@ name: P2-ETF-HURST Daily Pipeline
 
 on:
   schedule:
-    - cron: "0 2 * * 1-5"   # 02:00 UTC Mon–Fri (unchanged)
+    - cron: "0 23 * * 1-5"   # 23:00 UTC Mon–Fri (unchanged)
   workflow_dispatch:          # keep manual trigger (unchanged)
 
 jobs:
