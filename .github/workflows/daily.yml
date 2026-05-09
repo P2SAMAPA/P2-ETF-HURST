@@ -8,7 +8,7 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 40       # was 30; +10min for MFDFA (fast — numpy only)
+    timeout-minutes: 60       # was 30; +10min for MFDFA (fast — numpy only)
 
     steps:
       # ── Checkout ────────────────────────────────────────────────────────────
