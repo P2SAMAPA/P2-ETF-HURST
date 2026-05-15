@@ -2,7 +2,7 @@ name: Daily Data Update — P2-ETF-HURST (OHLCV Only)
 
 on:
   schedule:
-    # Runs Mon–Fri at 01:00 UTC (before the training pipeline)
+    # Runs Mon–Fri at 30:22 UTC (before the training pipeline)
     - cron: '0 1 * * 1-5'
   workflow_dispatch: # allow manual trigger
 
